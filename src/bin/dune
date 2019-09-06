@@ -1,0 +1,4 @@
+(executable
+ (libraries containers ats linenoise)
+ (flags :standard -open Ats)
+ (name main))

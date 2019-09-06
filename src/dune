@@ -1,0 +1,3 @@
+(library
+ (name ats)
+ (libraries containers iter))
