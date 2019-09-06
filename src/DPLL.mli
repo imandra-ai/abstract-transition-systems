@@ -26,7 +26,7 @@ module State : sig
     | Sat
     | Unsat
     | Conflict of Clause.t
-    | Idle
+    | Searching
   type t = private {
     cs: Clause.t list;
     trail: trail;

@@ -9,7 +9,7 @@ let repl ?(ats=DPLL.ats) () =
   let (module A) = ats in
   (* current state *)
   let cur_st_ = ref A.State.empty in
-  let choices_ : A.State.t list ref = ref [] in
+  let choices_ : (A.State.t * string) list ref = ref [] in
   let done_ = ref false in
   LNoise.set_multiline false;
   let all_cmds_ = [
@@ -32,26 +32,32 @@ let repl ?(ats=DPLL.ats) () =
       match List.assoc (String.trim s) all_cmds_ with
       | h -> Some (h, LNoise.Blue, false)
       | exception _ -> None);
+  let pp_choices() =
+    Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
+      (Util.pp_list
+         Fmt.(within "(" ")" @@ hbox @@ pair ~sep:(return ": ") int
+                (pair ~sep:(return " by@ ") A.State.pp string_quoted)))
+      (CCList.mapi CCPair.make !choices_);
+  in
   let rec do_next i =
     if i<=0 then ()
     else (
       match A.next !cur_st_ with
-      | ATS.Done st' ->
-        Fmt.printf "@[<2>@{<Green>done@}, last state:@ %a@]@." A.State.pp st';
+      | ATS.Done (st', expl) ->
+        Fmt.printf "@[<2>@{<Green>done@} by %S, last state:@ %a@]@." expl A.State.pp st';
         cur_st_ := st';
         done_ := true
       | ATS.Error msg ->
         Fmt.printf "@{<Red>error@}: %s@." msg;
-      | ATS.One st' | ATS.Choice [st'] ->
-        Fmt.printf "@[<2>@{<green>deterministic transition@} to@ %a@]@." A.State.pp st';
+      | ATS.One (st', expl) | ATS.Choice [(st', expl)] ->
+        Fmt.printf "@[<2>@{<green>deterministic transition@} %S to@ %a@]@."
+          expl A.State.pp st';
         cur_st_ := st';
         do_next (i-1); (* continue! *)
       | ATS.Choice [] -> assert false
       | ATS.Choice l ->
         choices_ := l;
-        Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
-          (Util.pp_list Fmt.(within "(" ")" @@ hbox @@ pair int A.State.pp))
-          (CCList.mapi CCPair.make l);
+        pp_choices();
     )
   in
   let rec loop () =
@@ -70,6 +76,7 @@ let repl ?(ats=DPLL.ats) () =
       | "show" ->
         LNoise.history_add s |> ignore;
         Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
+        if !choices_ <> [] then pp_choices();
         loop()
       | "next" when !done_ ->
         Fmt.printf "@{<Red>error@}: already in final state@.";
@@ -112,12 +119,12 @@ let repl ?(ats=DPLL.ats) () =
             begin match
                 let i = int_of_string i in i, List.nth !choices_ i
               with
-              | i, c ->
-                Fmt.printf "@[<2>picked%d: next state@ %a@]@." i A.State.pp c;
+              | i, (c,expl) ->
+                Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@." i expl A.State.pp c;
                 choices_ := [];
                 cur_st_ := c;
               | exception _ ->
-                Fmt.printf "@{<Red>error@}: invalid choice (1..%d)"
+                Fmt.printf "@{<Red>error@}: invalid choice (0..%d)@."
                   (List.length !choices_)
             end
           | _ ->

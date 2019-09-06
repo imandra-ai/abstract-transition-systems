@@ -8,7 +8,7 @@ type 'a step =
   | One of 'a (* forced transition *)
   | Choice of 'a list
 
-type 'a rule = 'a  -> 'a step option
+type ('a, 'b) rule = 'a  -> 'b step option
 
 (** {2 Minimum implementation of an abstract transition system implementation} *)
 module type BASIC = sig
@@ -22,8 +22,9 @@ module type BASIC = sig
   end
 
   (** A set of rules, by decreasing layer of priority. Each rule
-      can fire or return [None] *)
-  val rules : State.t rule list list
+      can fire, returning new states (with explanation for the transition),
+      or return [None] *)
+  val rules : (State.t, State.t * string) rule list list
 end
 
 (** An abstract transition system implementation *)
@@ -31,7 +32,7 @@ module type S = sig
   module B : BASIC
   include module type of B
 
-  val next : State.t -> State.t step
+  val next : State.t -> (State.t * string) step
 end
 
 module Make(B : BASIC) : S with module B = B = struct

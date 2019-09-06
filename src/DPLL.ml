@@ -28,7 +28,7 @@ module State = struct
     | Sat
     | Unsat
     | Conflict of Clause.t
-    | Idle
+    | Searching
   type t = {
     cs: Clause.t list;
     trail: trail;
@@ -56,12 +56,12 @@ module State = struct
     ) in
     {cs;trail;status;_all_vars; _to_decide; _assign}
 
-  let empty : t = make [] [] Idle
+  let empty : t = make [] [] Searching
 
   let pp_status out = function
     | Sat -> Fmt.string out "sat"
     | Unsat -> Fmt.string out "unsat"
-    | Idle -> Fmt.string out "idle"
+    | Searching -> Fmt.string out "searching"
     | Conflict c -> Fmt.fprintf out "(@[conflict %a@])" Clause.pp c
 
   let pp_trail_elt out (k,lit) = match k with
@@ -77,7 +77,7 @@ module State = struct
   let parse : t P.t =
     let open P in
     (skip_white *> char '(' *> many Clause.parse <* skip_white <* char ')')
-    >|= fun cs -> make cs [] Idle
+    >|= fun cs -> make cs [] Searching
 
   let eval_to_false (self:t) (c:Clause.t) : bool =
     let lazy assign = self._assign in
@@ -88,13 +88,13 @@ module State = struct
     | Conflict c ->
       begin match self.trail with
       | [] ->
-        Some (One (make self.cs self.trail Unsat)) (* unsat! *)
+        Some (One (make self.cs self.trail Unsat, "empty trail")) (* unsat! *)
       | (Decision,lit)::trail' when lit> 0 ->
         (* backtrack, and make opposite decision *)
-        Some (One (make self.cs ((Decision, -lit) :: trail') Idle))
+        Some (One (make self.cs ((Decision, -lit) :: trail') Searching, "backtrack"))
       | _::trail' ->
         (* backtrack further *)
-        Some (One (make self.cs trail' (Conflict c)))
+        Some (One (make self.cs trail' (Conflict c), "backtrack"))
       end
     | _ -> None
 
@@ -112,7 +112,8 @@ module State = struct
   let propagate self : _ ATS.step option =
     match find_unit_c self with
     | Some (c,l) ->
-      Some (ATS.One (make self.cs ((Prop c,l)::self.trail) Idle))
+      let expl = Fmt.sprintf "propagate %a from %a" Lit.pp l Clause.pp c in
+      Some (ATS.One (make self.cs ((Prop c,l)::self.trail) Searching, expl))
     | None -> None
 
   let decide self : _ ATS.step option =
@@ -120,16 +121,17 @@ module State = struct
     let lazy vars = self._to_decide in
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.Done (make self.cs self.trail Sat))
+      Some (ATS.Done (make self.cs self.trail Sat, "all vars decided"))
     ) else if Lit.Set.cardinal vars= 1 then (
       (* only one possible decision *)
       let v = Lit.Set.choose vars in
-      Some (ATS.One (make self.cs ((Decision,v) :: self.trail) Idle))
+      Some (ATS.One (make self.cs ((Decision,v) :: self.trail) Searching, "decide"))
     ) else (
       (* multiple possible decisions *)
       let decs =
         Lit.Set.to_seq vars
-        |> Iter.map (fun v -> make self.cs ((Decision,v) :: self.trail) Idle)
+        |> Iter.map
+          (fun v -> make self.cs ((Decision,v) :: self.trail) Searching, "decide")
         |> Iter.to_rev_list
       in
       Some (ATS.Choice decs)
@@ -140,20 +142,19 @@ module State = struct
     | None -> None
     | Some c ->
       (* conflict! *)
-      Some (ATS.One (make self.cs self.trail (Conflict c)))
+      Some (ATS.One (make self.cs self.trail (Conflict c), "false clause"))
 
   let is_done (self:t) =
     match self.status with
-    | Sat | Unsat -> Some (ATS.Done self)
+    | Sat | Unsat -> Some (ATS.Done (self, "done"))
     | _ -> None
 
-  let rules : t ATS.rule list list = [
+  let rules : _ ATS.rule list list = [
     [is_done];
     [conflict_];
     [find_false];
     [propagate];
     [decide];
-
   ]
 end
 
