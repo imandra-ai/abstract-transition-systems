@@ -17,7 +17,8 @@ module Clause = struct
 
   let parse : t P.t =
     let open P in
-    (skip_white *> char '(' *> many (try_ Lit.parse)) <* try_ (skip_white <* char ')')
+    parsing "clause"
+      (skip_white *> char '(' *> many (try_ Lit.parse)) <* skip_white <* char ')'
 end
 
 module State = struct
@@ -76,7 +77,8 @@ module State = struct
 
   let parse : t P.t =
     let open P in
-    (skip_white *> char '(' *> many Clause.parse <* skip_white <* char ')')
+    (skip_white *> char '(' *>
+     parsing "clause list" (many Clause.parse <* skip_white) <* char ')')
     >|= fun cs -> make cs [] Searching
 
   let eval_to_false (self:t) (c:Clause.t) : bool =

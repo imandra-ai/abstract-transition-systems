@@ -5,33 +5,69 @@ let ats_l : ATS.t list = [
   DPLL.ats;
 ]
 
-let repl ?(ats=DPLL.ats) () =
-  let (module A) = ats in
-  (* current state *)
-  let cur_st_ = ref A.State.empty in
-  let choices_ : (A.State.t * string) list ref = ref [] in
-  let done_ = ref false in
-  LNoise.set_multiline false;
-  let all_cmds_ = [
+module Cmd(A: ATS.S) = struct
+  type t =
+    | Quit
+    | Next of int
+    | Show
+    | Help of string option
+    | Pick of int
+    | Init of A.State.t
+
+  let all_ = [
     "quit", " quits";
     "show", " show current state";
     "init", " <st> parse st and sets current state to it";
     "next", " <n>? transition to next state (n times if provided)";
     "pick", " <i> pick state i in list of choices";
     "help", " show help";
-  ] in
+  ]
+
+  (* command parser *)
+  let parse : t P.t =
+    let open P in
+    skip_white *> parsing "command" (
+      (try_ (string "quit") *> return Quit)
+      <|> (try_ (string "show") *> return Show)
+      <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
+      <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
+      <|> (try_ (string "next") *> skip_white *>
+           (let i = (P.try_ U.int) <|> return 1 in
+            i >|= fun i -> Next i))
+      <|> (try_ (string "help") *> skip_white *>
+           ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
+           Help what)
+      <|> P.fail "invalid command"
+    ) <* skip_white
+
+  let hints (s:string) : _ option =
+    match List.assoc (String.trim s) all_ with
+    | h -> Some (h, LNoise.Blue, false)
+    | exception _ -> None
+
+  (* provide basic completions *)
+  let complete (s:string) : string list =
+    CCList.filter_map
+      (fun (cmd,_) ->
+         if CCString.prefix ~pre:s cmd then Some cmd else None)
+      all_
+end
+
+let repl ?(ats=DPLL.ats) () =
+  let (module A) = ats in
+  let module Cmd = Cmd(A) in
+  (* current state *)
+  let cur_st_ = ref A.State.empty in
+  let choices_ : (A.State.t * string) list ref = ref [] in
+  let done_ = ref false in
+  LNoise.set_multiline false;
   (* completion of commands *)
   LNoise.set_completion_callback
     (fun s compl ->
-       List.iter
-         (fun (cmd,_) ->
-            if CCString.prefix ~pre:s cmd then LNoise.add_completion compl cmd)
-         all_cmds_);
+       Cmd.complete s |> List.iter (LNoise.add_completion compl));
   (* show help for commands *)
-  LNoise.set_hints_callback (fun s ->
-      match List.assoc (String.trim s) all_cmds_ with
-      | h -> Some (h, LNoise.Blue, false)
-      | exception _ -> None);
+  LNoise.set_hints_callback Cmd.hints;
+  (* print active list of choices *)
   let pp_choices() =
     Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
       (Util.pp_list
@@ -39,6 +75,8 @@ let repl ?(ats=DPLL.ats) () =
                 (pair ~sep:(return " by@ ") A.State.pp string_quoted)))
       (CCList.mapi CCPair.make !choices_);
   in
+  (* run [A.next] at most [i] times, but stop if it finishes or a choice
+     must be made. *)
   let rec do_next i =
     if i<=0 then ()
     else (
@@ -61,76 +99,56 @@ let repl ?(ats=DPLL.ats) () =
     )
   in
   let rec loop () =
-    match LNoise.linenoise "> " with
+    match LNoise.linenoise "> " |> CCOpt.map String.trim with
     | None -> () (* exit *)
+    | Some "" -> loop()
     | Some s ->
-      let s = String.trim s in
-      match s with
-      | "" -> loop ()
-      | "quit" -> ()
-      | "help" ->
-        Format.printf "available commands: [@[%a@]]@."
-          (pp_list Fmt.string)
-          (List.map fst all_cmds_);
+      match P.parse_string Cmd.parse s with
+      | Error msg ->
+        Fmt.printf "@{<Red>error@}: invalid command: %s@." msg;
         loop()
-      | "show" ->
-        LNoise.history_add s |> ignore;
-        Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
-        if !choices_ <> [] then pp_choices();
-        loop()
-      | "next" when !done_ ->
-        Fmt.printf "@{<Red>error@}: already in final state@.";
-        loop()
-      | "next" ->
-        LNoise.history_add s |> ignore;
-        do_next 1;
-        loop()
-      | _ ->
-        begin match CCString.Split.left ~by:" " s with
-          | Some ("help", cmd) ->
-            if List.mem_assoc cmd all_cmds_ then (
-              LNoise.history_add s |> ignore;
-              let h = List.assoc cmd all_cmds_ in
-              Format.printf "%s@." h
-            ) else (
-              Format.printf "error: unknown command %S" cmd
-            )
-          | Some ("next",i) ->
-            begin match int_of_string i with
-              | n when n>0 ->
-                LNoise.history_add s |> ignore;
-                do_next n;
-              | n ->
-                Fmt.printf "@{<Red>error@}: need positive integer, not %d@." n;
-              | exception _ ->
-                Fmt.printf "@{<Red>error@}: need positive integer@.";
-            end
-          | Some ("init", st) ->
-            (* set initial state *)
-            begin match P.parse_string A.State.parse st with
-              | Error e ->
-                Fmt.printf "error: invalid state: %s@." e
-              | Ok st ->
-                LNoise.history_add s |> ignore;
-                done_ := false;
-                cur_st_ := st
-            end
-          | Some ("pick", i) ->
-            begin match
-                let i = int_of_string i in i, List.nth !choices_ i
-              with
-              | i, (c,expl) ->
-                Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@." i expl A.State.pp c;
-                choices_ := [];
-                cur_st_ := c;
-              | exception _ ->
-                Fmt.printf "@{<Red>error@}: invalid choice (0..%d)@."
-                  (List.length !choices_)
-            end
-          | _ ->
-            Fmt.printf "invalid command@.";
-        end;
-        loop ()
+      | Ok Cmd.Quit -> () (* exit *)
+      | Ok cmd ->
+        LNoise.history_add s |> ignore; (* save cmd *)
+        process_cmd cmd;
+        loop();
+  and process_cmd = function
+    | Cmd.Quit -> assert false
+    | Cmd.Help None ->
+      Format.printf "available commands: [@[%a@]]@."
+        (pp_list Fmt.string)
+        (List.map fst Cmd.all_);
+    | Cmd.Help (Some cmd) ->
+      if List.mem_assoc cmd Cmd.all_ then (
+        let h = List.assoc cmd Cmd.all_ in
+        Format.printf "%s@." h
+      ) else (
+        Format.printf "@{<Red>error@}: unknown command %S" cmd
+      )
+    | Cmd.Show ->
+      Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
+      if !choices_ <> [] then pp_choices();
+    | Cmd.Next _ when !done_ ->
+      Fmt.printf "@{<Red>error@}: already in final state@.";
+    | Cmd.Next n when n <= 0 ->
+      Fmt.printf "@{<Red>error@}: need positive integer, not %d@." n;
+    | Cmd.Next n ->
+      do_next n
+    | Cmd.Init st ->
+      done_ := false;
+      choices_ := [];
+      cur_st_ := st
+    | Cmd.Pick i ->
+      begin match List.nth !choices_ i with
+        | (c,expl) ->
+          Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@."
+            i expl A.State.pp c;
+          choices_ := [];
+          cur_st_ := c;
+        | exception _ ->
+          Fmt.printf "@{<Red>error@}: invalid choice %d, must be in (0..%d)@."
+            i (List.length !choices_)
+      end
   in
   loop ()
 
