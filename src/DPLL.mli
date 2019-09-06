@@ -42,7 +42,7 @@ module State : sig
   val parse : t P.t
 end
 
-module A : ATS.S with module State = State
+module A : ATS.BASIC with module State = State
 
 val ats : ATS.t
 

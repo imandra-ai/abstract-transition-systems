@@ -83,19 +83,20 @@ module State = struct
     let lazy assign = self._assign in
     List.for_all (fun l -> Lit.Map.get_or ~default:false (-l) assign) c
 
-  let find_false (self:t) : Clause.t option =
-    CCList.find_opt (eval_to_false self) self.cs
-
-  let do_conflict (self:t) c : _ ATS.step =
-    match self.trail with
-    | [] ->
-      One (make self.cs self.trail Unsat) (* unsat! *)
-    | (Decision,lit)::trail' when lit> 0 ->
-      (* backtrack, and make opposite decision *)
-      One (make self.cs ((Decision, -lit) :: trail') Idle)
-    | _::trail' ->
-      (* backtrack further *)
-      One (make self.cs trail' (Conflict c))
+  let conflict_ (self:t) : _ ATS.step option =
+    match self.status with
+    | Conflict c ->
+      begin match self.trail with
+      | [] ->
+        Some (One (make self.cs self.trail Unsat)) (* unsat! *)
+      | (Decision,lit)::trail' when lit> 0 ->
+        (* backtrack, and make opposite decision *)
+        Some (One (make self.cs ((Decision, -lit) :: trail') Idle))
+      | _::trail' ->
+        (* backtrack further *)
+        Some (One (make self.cs trail' (Conflict c)))
+      end
+    | _ -> None
 
   let find_unit_c (self:t) : (Clause.t * Lit.t) option =
     let lazy assign = self._assign in
@@ -114,16 +115,16 @@ module State = struct
       Some (ATS.One (make self.cs ((Prop c,l)::self.trail) Idle))
     | None -> None
 
-  let do_decision self : _ ATS.step =
+  let decide self : _ ATS.step option =
     (* try to decide *)
     let lazy vars = self._to_decide in
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
-      ATS.Done (make self.cs self.trail Sat)
+      Some (ATS.Done (make self.cs self.trail Sat))
     ) else if Lit.Set.cardinal vars= 1 then (
       (* only one possible decision *)
       let v = Lit.Set.choose vars in
-      ATS.One (make self.cs ((Decision,v) :: self.trail) Idle)
+      Some (ATS.One (make self.cs ((Decision,v) :: self.trail) Idle))
     ) else (
       (* multiple possible decisions *)
       let decs =
@@ -131,32 +132,36 @@ module State = struct
         |> Iter.map (fun v -> make self.cs ((Decision,v) :: self.trail) Idle)
         |> Iter.to_rev_list
       in
-      ATS.Choice decs
+      Some (ATS.Choice decs)
     )
 
-  let do_idle self : _ ATS.step =
-    match find_false self with
+  let find_false (self:t) : _ option =
+    match CCList.find_opt (eval_to_false self) self.cs with
+    | None -> None
     | Some c ->
       (* conflict! *)
-      One (make self.cs self.trail (Conflict c))
-    | None ->
-      match propagate self with
-      | Some s -> s
-      | None -> do_decision self
+      Some (ATS.One (make self.cs self.trail (Conflict c)))
 
-  (* main step function *)
-  let next (self:t) : t ATS.step =
+  let is_done (self:t) =
     match self.status with
-    | Sat | Unsat -> ATS.Done self
-    | Conflict c -> do_conflict self c
-    | Idle -> do_idle self
+    | Sat | Unsat -> Some (ATS.Done self)
+    | _ -> None
+
+  let rules : t ATS.rule list list = [
+    [is_done];
+    [conflict_];
+    [find_false];
+    [propagate];
+    [decide];
+
+  ]
 end
 
 module A = struct
   let name = "dpll"
   module State = State
 
-  let next = State.next
+  let rules = State.rules
 end
 
-let ats : ATS.t = (module A)
+let ats : ATS.t = (module ATS.Make(A))

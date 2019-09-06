@@ -9,13 +9,15 @@ let repl ?(ats=DPLL.ats) () =
   let (module A) = ats in
   (* current state *)
   let cur_st_ = ref A.State.empty in
+  let choices_ : A.State.t list ref = ref [] in
   let done_ = ref false in
   LNoise.set_multiline false;
   let all_cmds_ = [
     "quit", " quits";
     "show", " show current state";
     "init", " <st> parse st and sets current state to it";
-    "step", " transition to next state";
+    "next", " <n>? transition to next state (n times if provided)";
+    "pick", " <i> pick state i in list of choices";
     "help", " show help";
   ] in
   (* completion of commands *)
@@ -30,6 +32,28 @@ let repl ?(ats=DPLL.ats) () =
       match List.assoc (String.trim s) all_cmds_ with
       | h -> Some (h, LNoise.Blue, false)
       | exception _ -> None);
+  let rec do_next i =
+    if i<=0 then ()
+    else (
+      match A.next !cur_st_ with
+      | ATS.Done st' ->
+        Fmt.printf "@[<2>@{<Green>done@}, last state:@ %a@]@." A.State.pp st';
+        cur_st_ := st';
+        done_ := true
+      | ATS.Error msg ->
+        Fmt.printf "@{<Red>error@}: %s@." msg;
+      | ATS.One st' | ATS.Choice [st'] ->
+        Fmt.printf "@[<2>@{<green>deterministic transition@} to@ %a@]@." A.State.pp st';
+        cur_st_ := st';
+        do_next (i-1); (* continue! *)
+      | ATS.Choice [] -> assert false
+      | ATS.Choice l ->
+        choices_ := l;
+        Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
+          (Util.pp_list Fmt.(within "(" ")" @@ hbox @@ pair int A.State.pp))
+          (CCList.mapi CCPair.make l);
+    )
+  in
   let rec loop () =
     match LNoise.linenoise "> " with
     | None -> () (* exit *)
@@ -52,19 +76,7 @@ let repl ?(ats=DPLL.ats) () =
         loop()
       | "next" ->
         LNoise.history_add s |> ignore;
-        begin match A.next !cur_st_ with
-          | ATS.Done st' ->
-            Fmt.printf "@[<2>done, last state:@ %a@]@." A.State.pp st';
-            cur_st_ := st'; done_ := true
-          | ATS.Error msg ->
-            Fmt.printf "@{<Red>error@}: %s@." msg;
-          | ATS.One st' | ATS.Choice [st'] ->
-            Fmt.printf "@[<2>deterministic transition to@ %a@]@." A.State.pp st';
-            cur_st_ := st';
-          | ATS.Choice [] -> assert false
-          | ATS.Choice _l ->
-            Fmt.printf "TODO: multiple choices@.'" (* TODO *)
-        end;
+        do_next 1;
         loop()
       | _ ->
         begin match CCString.Split.left ~by:" " s with
@@ -76,18 +88,40 @@ let repl ?(ats=DPLL.ats) () =
             ) else (
               Format.printf "error: unknown command %S" cmd
             )
-        | Some ("init", st) ->
-          (* set initial state *)
-          begin match P.parse_string A.State.parse st with
-            | Error e ->
-              Fmt.printf "error: invalid state: %s@." e
-            | Ok st ->
-              LNoise.history_add s |> ignore;
-              done_ := false;
-              cur_st_ := st
-          end
-        | _ ->
-          Fmt.printf "invalid command@.";
+          | Some ("next",i) ->
+            begin match int_of_string i with
+              | n when n>0 ->
+                LNoise.history_add s |> ignore;
+                do_next n;
+              | n ->
+                Fmt.printf "@{<Red>error@}: need positive integer, not %d@." n;
+              | exception _ ->
+                Fmt.printf "@{<Red>error@}: need positive integer@.";
+            end
+          | Some ("init", st) ->
+            (* set initial state *)
+            begin match P.parse_string A.State.parse st with
+              | Error e ->
+                Fmt.printf "error: invalid state: %s@." e
+              | Ok st ->
+                LNoise.history_add s |> ignore;
+                done_ := false;
+                cur_st_ := st
+            end
+          | Some ("pick", i) ->
+            begin match
+                let i = int_of_string i in i, List.nth !choices_ i
+              with
+              | i, c ->
+                Fmt.printf "@[<2>picked%d: next state@ %a@]@." i A.State.pp c;
+                choices_ := [];
+                cur_st_ := c;
+              | exception _ ->
+                Fmt.printf "@{<Red>error@}: invalid choice (1..%d)"
+                  (List.length !choices_)
+            end
+          | _ ->
+            Fmt.printf "invalid command@.";
         end;
         loop ()
   in
