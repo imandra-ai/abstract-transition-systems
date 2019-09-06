@@ -53,6 +53,24 @@ module Cmd(A: ATS.S) = struct
       all_
 end
 
+(* multi-line input if there are more "(" than ")" so far *)
+let lnoise_input prompt : string option =
+  let buf = Buffer.create 32 in
+  let depth = ref 0 in (* balance "(" and ")" *)
+  let first = ref true in
+  let rec loop () =
+    let p = if !first then prompt else String.make (String.length prompt) ' ' in
+    first := false;
+    match LNoise.linenoise p with
+    | None when Buffer.length buf=0 -> None
+    | None -> Some (Buffer.contents buf)
+    | Some s ->
+      String.iter (function '(' -> incr depth | ')' -> decr depth | _ -> ()) s;
+      Buffer.add_string buf s;
+      if !depth <= 0 then Some (Buffer.contents buf) else loop()
+  in
+  loop()
+
 let repl ?(ats=DPLL.ats) () =
   let (module A) = ats in
   let module Cmd = Cmd(A) in
@@ -99,7 +117,8 @@ let repl ?(ats=DPLL.ats) () =
     )
   in
   let rec loop () =
-    match LNoise.linenoise "> " |> CCOpt.map String.trim with
+    match lnoise_input "> " |> CCOpt.map String.trim with
+    | exception Sys.Break -> loop()
     | None -> () (* exit *)
     | Some "" -> loop()
     | Some s ->
