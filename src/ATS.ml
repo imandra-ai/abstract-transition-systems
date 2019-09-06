@@ -3,9 +3,10 @@
 open Util
 
 type 'a step =
-  | Done
+  | Done of 'a (* final state *)
   | Error of string
-  | Sub of 'a list
+  | One of 'a (* forced transition *)
+  | Choice of 'a list
 
 (** An abstract transition system implementation *)
 module type S = sig
