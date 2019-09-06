@@ -8,6 +8,7 @@ let ats_l : ATS.t list = [
 module Cmd(A: ATS.S) = struct
   type t =
     | Quit
+    | Auto of int
     | Next of int
     | Show
     | Help of string option
@@ -19,6 +20,7 @@ module Cmd(A: ATS.S) = struct
     "show", " show current state";
     "init", " <st> parse st and sets current state to it";
     "next", " <n>? transition to next state (n times if provided)";
+    "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
     "pick", " <i> pick state i in list of choices";
     "help", " show help";
   ]
@@ -26,14 +28,14 @@ module Cmd(A: ATS.S) = struct
   (* command parser *)
   let parse : t P.t =
     let open P in
+    let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
     skip_white *> parsing "command" (
       (try_ (string "quit") *> return Quit)
       <|> (try_ (string "show") *> return Show)
+      <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
       <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
       <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
-      <|> (try_ (string "next") *> skip_white *>
-           (let i = (P.try_ U.int) <|> return 1 in
-            i >|= fun i -> Next i))
+      <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
       <|> (try_ (string "help") *> skip_white *>
            ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
            Help what)
@@ -86,35 +88,57 @@ let repl ?(ats=DPLL.ats) () =
   (* show help for commands *)
   LNoise.set_hints_callback Cmd.hints;
   (* print active list of choices *)
-  let pp_choices() =
+  let pp_choices l=
     Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
       (Util.pp_list
          Fmt.(within "(" ")" @@ hbox @@ pair ~sep:(return ": ") int
                 (pair ~sep:(return " by@ ") A.State.pp string_quoted)))
-      (CCList.mapi CCPair.make !choices_);
+      (CCList.mapi CCPair.make l);
+  in
+  let call_next_once_ ~on_choice =
+    match A.next !cur_st_ with
+    | ATS.Done (st', expl) ->
+      Fmt.printf "@[<2>@{<Green>done@} by %S, last state:@ %a@]@." expl A.State.pp st';
+      cur_st_ := st';
+      done_ := true
+    | ATS.Error msg ->
+      Fmt.printf "@{<Red>error@}: %s@." msg;
+    | ATS.One (st', expl) | ATS.Choice [(st', expl)] ->
+      Fmt.printf "@[<2>@{<green>deterministic transition@} %S to@ %a@]@."
+        expl A.State.pp st';
+      cur_st_ := st';
+    | ATS.Choice [] -> assert false
+    | ATS.Choice l ->
+      on_choice l;
   in
   (* run [A.next] at most [i] times, but stop if it finishes or a choice
      must be made. *)
   let rec do_next i =
     if i<=0 then ()
+    else if !done_ then ()
     else (
-      match A.next !cur_st_ with
-      | ATS.Done (st', expl) ->
-        Fmt.printf "@[<2>@{<Green>done@} by %S, last state:@ %a@]@." expl A.State.pp st';
+      call_next_once_ ~on_choice:(fun l -> choices_ := l; pp_choices l);
+      if !choices_ = [] then do_next (i-1)
+    );
+  in
+  let rec do_auto i =
+    let auto_choice = function
+      | [] -> assert false
+      | (st',expl) :: _ ->
+        Fmt.printf "@[<2>@{<yellow>auto-choice@} %S to@ %a@]@." expl A.State.pp st';
+        choices_ := [];
         cur_st_ := st';
-        done_ := true
-      | ATS.Error msg ->
-        Fmt.printf "@{<Red>error@}: %s@." msg;
-      | ATS.One (st', expl) | ATS.Choice [(st', expl)] ->
-        Fmt.printf "@[<2>@{<green>deterministic transition@} %S to@ %a@]@."
-          expl A.State.pp st';
-        cur_st_ := st';
-        do_next (i-1); (* continue! *)
-      | ATS.Choice [] -> assert false
-      | ATS.Choice l ->
-        choices_ := l;
-        pp_choices();
-    )
+    in
+    match !choices_ with
+    | _ when i<0 -> ()
+    | _ when !done_ -> ()
+    | [] ->
+      (* do one step of [next], with automatic choice if needed *)
+      call_next_once_ ~on_choice:auto_choice;
+      do_auto (i-1)
+    | l ->
+      auto_choice l;
+      do_auto (i-1);
   in
   let rec loop () =
     match lnoise_input "> " |> CCOpt.map String.trim with
@@ -146,7 +170,9 @@ let repl ?(ats=DPLL.ats) () =
       )
     | Cmd.Show ->
       Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
-      if !choices_ <> [] then pp_choices();
+      if !choices_ <> [] then pp_choices !choices_
+    | Cmd.Auto n ->
+      do_auto n
     | Cmd.Next _ when !done_ ->
       Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Next n when n <= 0 ->
