@@ -1,3 +1,4 @@
 (library
  (name ats)
+ (flags :standard -warn-error -7-32)
  (libraries containers iter))

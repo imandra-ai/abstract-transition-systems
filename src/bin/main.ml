@@ -3,7 +3,10 @@ module ATS = ATS
 
 let ats_l : ATS.t list = [
   DPLL.ats;
+  CDCL.ats;
 ]
+
+let default_ats = CDCL.ats
 
 module Cmd(A: ATS.S) = struct
   type t =
@@ -73,7 +76,7 @@ let lnoise_input prompt : string option =
   in
   loop()
 
-let repl ?(ats=DPLL.ats) () =
+let repl ?(ats=default_ats) () =
   let (module A) = ats in
   let module Cmd = Cmd(A) in
   (* current state *)
@@ -198,7 +201,7 @@ let repl ?(ats=DPLL.ats) () =
   loop ()
 
 let () =
-  let ats_ = ref DPLL.ats in
+  let ats_ = ref default_ats in
   let color_ = ref true in
   let find_ats_ s =
     match List.find (fun a -> ATS.name a = s) ats_l with
@@ -206,8 +209,9 @@ let () =
     | exception _ -> Util.errorf "unknown ATS: %S" s
   in
   let opts = [
-    "-s", Arg.Symbol (List.map ATS.name ats_l, find_ats_), " choose transition system";
-    "-nc", Arg.Clear color_, " disable colors";
+    ("-s", Arg.Symbol (List.map ATS.name ats_l, find_ats_),
+     Printf.sprintf " choose transition system (default %s)" (ATS.name default_ats));
+    ("-nc", Arg.Clear color_, " disable colors");
   ] |> Arg.align
   in
   Arg.parse opts (fun _ -> ()) "usage: ats [option*]";
