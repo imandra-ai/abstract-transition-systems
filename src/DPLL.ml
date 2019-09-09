@@ -124,16 +124,14 @@ module State = struct
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
       Some (ATS.Done (make self.cs self.trail Sat, "all vars decided"))
-    ) else if Lit.Set.cardinal vars= 1 then (
-      (* only one possible decision *)
-      let v = Lit.Set.choose vars in
-      Some (ATS.One (make self.cs ((Decision,v) :: self.trail) Searching, "decide"))
     ) else (
-      (* multiple possible decisions *)
+      (* decisions, always positive *)
       let decs =
         Lit.Set.to_seq vars
         |> Iter.map
-          (fun v -> make self.cs ((Decision,v) :: self.trail) Searching, "decide")
+          (fun v ->
+             make self.cs ((Decision,v) :: self.trail) Searching,
+             Fmt.sprintf "decide %a" Lit.pp v)
         |> Iter.to_rev_list
       in
       Some (ATS.Choice decs)
