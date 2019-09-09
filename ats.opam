@@ -1,0 +1,21 @@
+opam-version: "2.0"
+name: "ats"
+version: "0.1"
+authors: ["Simon Cruanes"]
+maintainer: "simon@imandra.ai"
+license: "TBD"
+synopsis: "An implementation of several classic transition systems that describe algorithms for SAT or SMT"
+build: [
+  ["dune" "build" "@install" "-p" name "-j" jobs]
+  ["dune" "build" "@doc" "-p" name] {with-doc}
+  ["dune" "runtest" "-p" name] {with-test}
+]
+depends: [
+  "containers"
+  "iter"
+  "alcotest" {with-test}
+]
+tags: [ "sat" "smt" ]
+homepage: "https://github.com/aestheticintegration/abstract-transition-systems/"
+bug-reports: "https://github.com/aestheticintegration/abstract-transition-systems/issues"
+dev-repo: "git+https://github.com/aestheticintegration/abstract-transition-systems.git"
