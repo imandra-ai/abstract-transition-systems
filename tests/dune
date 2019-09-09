@@ -1,0 +1,9 @@
+(executable
+ (name run_tests)
+ (libraries containers ats alcotest))
+
+(alias
+ (name runtest)
+ (deps ./run_tests.exe)
+ (action
+  (run ./run_tests.exe)))
