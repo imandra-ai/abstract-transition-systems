@@ -5,17 +5,6 @@ module L = CCList
 module type S = sig
   module A : ATS.S
 
-  module Cmd0 : sig
-    type t =
-      | Quit
-      | Auto of int
-      | Next of int
-      | Show
-      | Help of string option
-      | Pick of int
-      | Init of A.State.t
-  end
-
   module Transition : sig
     type t = {
       init: A.State.t;
@@ -31,10 +20,15 @@ module type S = sig
   end
 
   module Trace : sig
+    type status =
+      | Active
+      | Stopped
+      | Error of string
+
     type t = {
       init: A.State.t;
-      final: (A.State.t, string) result;
-      stopped: bool;
+      final: A.State.t;
+      status: status;
       transitions: Transition.t L.t;
     }
 
@@ -42,6 +36,7 @@ module type S = sig
     val append : t -> t -> t
     val transitions : t -> Transition.t Iter.t
     val pp : t Fmt.printer
+    val is_done : t -> bool (** not active *)
 
     module Infix : sig
       val (<+>) : t -> t -> t
@@ -49,5 +44,14 @@ module type S = sig
     include module type of Infix
   end
 
-  val run : Cmd0.t -> A.State.t -> Trace.t
+  module Tactic : sig
+    type t =
+      | Auto of int
+      | Next of int (* only follow deterministic transitions and unique choices *)
+    val pp : t Fmt.printer
+  end
+
+  type choice = (A.State.t * string) list
+
+  val run : Tactic.t -> A.State.t -> Trace.t * choice option
 end

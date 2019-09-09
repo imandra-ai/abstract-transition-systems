@@ -5,16 +5,6 @@ module type S = Run_intf.S
 
 module Make(A: ATS.S) = struct
   module A = A
-  module Cmd0 = struct
-    type t =
-      | Quit
-      | Auto of int
-      | Next of int
-      | Show
-      | Help of string option
-      | Pick of int
-      | Init of A.State.t
-  end
 
   module Transition = struct
     type t = {
@@ -26,6 +16,10 @@ module Make(A: ATS.S) = struct
       | Choice of int * string
       | Deterministic of string
       | Multi_deterministic of t list (* aggregate of deterministic transitions *)
+
+    let make init final expl : t = {init;final;expl}
+    let make_deter init final expl = make init final (Deterministic expl)
+    let make_choice init final i expl = make init final (Choice (i, expl))
 
     let rec pp out (s:t) : unit =
       Fmt.fprintf out
@@ -68,28 +62,33 @@ module Make(A: ATS.S) = struct
   end
 
   module Trace = struct
+    type status =
+      | Active
+      | Stopped
+      | Error of string
     type t = {
       init: A.State.t;
-      final: (A.State.t, string) result;
-      stopped: bool;
-      transitions: Transition.t list;
+      final: A.State.t;
+      status: status;
+      transitions: Transition.t L.t;
     }
 
     let transitions st = Iter.of_list st.transitions
-    let trivial st : t = {init=st; final=Ok st; stopped=false; transitions=[]}
+    let trivial st : t = {init=st; final=st; status=Active; transitions=[]}
+    let is_done_status = function Active -> false | Stopped | Error _ -> true
+    let is_done tr = is_done_status tr.status
 
     let append (tr1:t) (tr2:t) : t =
-      if tr1.stopped then tr1
-      else (
+      if tr1.status = Active then (
         let transitions=Transition.append_l tr1.transitions tr2.transitions in
-        { init=tr1.init; final=tr2.final; stopped= tr2.stopped; transitions; }
-      )
+        { init=tr1.init; final=tr2.final; status=tr2.status; transitions; }
+      ) else tr1
 
     let pp out (tr:t) : unit =
       Fmt.fprintf out
         "(@[trace%s@ @[<2>:init@ %a@]@ @[<2>:final@ %a@]@ @[<hv2>:transitions@ %a@]@])"
-        (if tr.stopped then "[stopped]" else "")
-        A.State.pp tr.init (Fmt.Dump.result A.State.pp) tr.final
+        (match tr.status with Active-> "" | Stopped -> "[stopped]" | Error _ -> "[error]")
+        A.State.pp tr.init A.State.pp tr.final
         (pp_list Transition.pp) tr.transitions
 
     module Infix = struct
@@ -98,6 +97,93 @@ module Make(A: ATS.S) = struct
     include Infix
   end
 
-  let run (_cmd:Cmd0.t) (_st:A.State.t) : Trace.t =
-    assert false (* TODO *)
+  module Tactic = struct
+    type t =
+      | Auto of int
+      | Next of int (* only follow deterministic transitions and unique choices *)
+
+    let pp out = function
+      | Auto 1 -> Fmt.string out "auto"
+      | Auto i -> Fmt.fprintf out "(auto %d)" i
+      | Next 1 -> Fmt.string out "next"
+      | Next i -> Fmt.fprintf out "(next %d)" i
+  end
+
+  type choice = (A.State.t * string) list
+
+  type tmp_st = {
+    mutable cur_st : A.State.t;
+    mutable status: Trace.status;
+    mutable choices: choice option;
+    mutable trace: Transition.t list;
+  }
+
+  let call_next_once_ st : unit =
+    match A.next st.cur_st with
+    | ATS.Done (st', expl) ->
+      st.trace <- Transition.make_deter st.cur_st st' expl :: st.trace;
+      st.cur_st <- st';
+      st.status <- Trace.Stopped;
+    | ATS.Error msg ->
+      st.status <- Trace.Error msg;
+    | ATS.One (st', expl) ->
+      st.trace <- Transition.make_deter st.cur_st st' expl :: st.trace;
+      st.cur_st <- st';
+    | ATS.Choice [(st', expl)] ->
+      st.trace <- Transition.make_choice st.cur_st st' 1 expl :: st.trace;
+      st.cur_st <- st';
+    | ATS.Choice [] ->
+      st.status <- Trace.Error "dead end: empty choice list"
+    | ATS.Choice l ->
+      st.choices <- Some l
+
+  (* run [A.next] at most [i] times, but stop if it finishes or a choice
+     must be made. *)
+  let rec do_next st i =
+    match st.status with
+    | Trace.Error _ | Trace.Stopped -> ()
+    | _ when i<=0 -> ()
+    | Trace.Active ->
+      call_next_once_ st;
+      if not (Trace.is_done_status st.status) && CCOpt.is_none st.choices then (
+        do_next st (i-1)
+      )
+
+  let rec do_auto (st:tmp_st) i : unit =
+    let auto_choice = function
+      | [] -> assert false
+      | (st',expl) :: _ ->
+        st.trace <- Transition.make_choice st.cur_st st' 1 expl :: st.trace;
+        st.choices <- None;
+        st.cur_st <- st';
+    in
+    begin match st.choices with
+      | _ when i<0 -> ()
+      | _ when Trace.is_done_status st.status -> ()
+      | None ->
+        (* do one step of [next], with automatic choice if needed *)
+        call_next_once_ st;
+        do_auto st (i-1)
+      | Some [] ->
+        st.status <- Error "dead end: no possible choice"
+      | Some l ->
+        auto_choice l;
+        do_auto st (i-1);
+        ()
+    end
+
+  let run (tactic:Tactic.t) (st0:A.State.t) : _ * _ =
+    let st = { trace=[]; cur_st=st0; choices=None; status=Trace.Active } in
+    begin match tactic with
+      | Tactic.Next n -> do_next st n
+      | Tactic.Auto n -> do_auto st n
+    end;
+    (* produce a trace from [st] *)
+    let trace = {
+      Trace.
+      init=st0; final=st.cur_st;
+      transitions=List.rev st.trace;
+      status=st.status;
+    } in
+    trace, st.choices
 end

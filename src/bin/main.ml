@@ -8,51 +8,54 @@ let ats_l : ATS.t list = [
 
 let default_ats = CDCL.ats
 
-module Make(A: ATS.S) = struct
-  include Ats.Run.Make(A)
+module Make_cmd(A: ATS.S) = struct
+  type t =
+    | Quit
+    | Auto of int
+    | Next of int
+    | Show
+    | Help of string option
+    | Pick of int
+    | Init of A.State.t
 
-  module Cmd = struct
-    include Cmd0
+  let all_ = [
+    "quit", " quits";
+    "show", " show current state";
+    "init", " <st> parse st and sets current state to it";
+    "next", " <n>? transition to next state (n times if provided)";
+    "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
+    "pick", " <i> pick state i in list of choices";
+    "help", " show help";
+  ]
 
-    let all_ = [
-      "quit", " quits";
-      "show", " show current state";
-      "init", " <st> parse st and sets current state to it";
-      "next", " <n>? transition to next state (n times if provided)";
-      "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
-      "pick", " <i> pick state i in list of choices";
-      "help", " show help";
-    ]
+  (* command parser *)
+  let parse : t P.t =
+    let open P in
+    let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
+    skip_white *> parsing "command" (
+      (try_ (string "quit") *> return Quit)
+      <|> (try_ (string "show") *> return Show)
+      <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
+      <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
+      <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
+      <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
+      <|> (try_ (string "help") *> skip_white *>
+           ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
+           Help what)
+      <|> P.fail "invalid command"
+    ) <* skip_white
 
-    (* command parser *)
-    let parse : t P.t =
-      let open P in
-      let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
-      skip_white *> parsing "command" (
-        (try_ (string "quit") *> return Quit)
-        <|> (try_ (string "show") *> return Show)
-        <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
-        <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
-        <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
-        <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
-        <|> (try_ (string "help") *> skip_white *>
-             ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
-             Help what)
-        <|> P.fail "invalid command"
-      ) <* skip_white
+  let hints (s:string) : _ option =
+    match List.assoc (String.trim s) all_ with
+    | h -> Some (h, LNoise.Blue, false)
+    | exception _ -> None
 
-    let hints (s:string) : _ option =
-      match List.assoc (String.trim s) all_ with
-      | h -> Some (h, LNoise.Blue, false)
-      | exception _ -> None
-
-    (* provide basic completions *)
-    let complete (s:string) : string list =
-      CCList.filter_map
-        (fun (cmd,_) ->
-           if CCString.prefix ~pre:s cmd then Some cmd else None)
-        all_
-  end
+  (* provide basic completions *)
+  let complete (s:string) : string list =
+    CCList.filter_map
+      (fun (cmd,_) ->
+         if CCString.prefix ~pre:s cmd then Some cmd else None)
+      all_
 end
 
 (* multi-line input if there are more "(" than ")" so far *)
@@ -75,11 +78,11 @@ let lnoise_input prompt : string option =
 
 let repl ?(ats=default_ats) () =
   let (module A) = ats in
-  let module R = Make(A) in
-  let module Cmd = R.Cmd in
+  let module Cmd = Make_cmd(A) in
+  let module R = Run.Make(A) in
   (* current state *)
   let cur_st_ = ref A.State.empty in
-  let choices_ : (A.State.t * string) list ref = ref [] in
+  let choices_ : (A.State.t * string) list option ref = ref None in
   let done_ = ref false in
   LNoise.set_multiline false;
   (* completion of commands *)
@@ -89,57 +92,40 @@ let repl ?(ats=default_ats) () =
   (* show help for commands *)
   LNoise.set_hints_callback Cmd.hints;
   (* print active list of choices *)
-  let pp_choices l=
+  let pp_choices l =
     Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
       (Util.pp_list
          Fmt.(within "(" ")" @@ hbox @@ pair ~sep:(return ": ") int
                 (pair ~sep:(return " by@ ") A.State.pp string_quoted)))
       (CCList.mapi CCPair.make l);
   in
-  let call_next_once_ ~on_choice =
-    match A.next !cur_st_ with
-    | ATS.Done (st', expl) ->
-      Fmt.printf "@[<2>@{<Green>done@} by %S, last state:@ %a@]@." expl A.State.pp st';
-      cur_st_ := st';
-      done_ := true
-    | ATS.Error msg ->
-      Fmt.printf "@{<Red>error@}: %s@." msg;
-    | ATS.One (st', expl) | ATS.Choice [(st', expl)] ->
-      Fmt.printf "@[<2>@{<green>deterministic transition@} %S to@ %a@]@."
-        expl A.State.pp st';
-      cur_st_ := st';
-    | ATS.Choice [] -> assert false
-    | ATS.Choice l ->
-      on_choice l;
+  let rec pp_transition out tr =
+    let open R.Transition in
+    match tr.expl with
+    | Choice (i,expl) ->
+      Fmt.fprintf out "@[<2>@{<yellow>choice@}[%d] %S to@ %a@]" i expl A.State.pp tr.final;
+    | Deterministic expl ->
+      Fmt.fprintf out "@[<2>@{<green>deterministic transition@} %S to@ %a@]"
+        expl A.State.pp tr.final;
+    | Multi_deterministic l ->
+      Fmt.fprintf out "@[<2>@{<green>multiple-steps@}[%d] to@ %a@ @[<hv2>:steps@ %a@]@]"
+        (List.length l) A.State.pp tr.final pp_transitions l;
+  and pp_transitions out l =
+    Fmt.fprintf out "@[<v>%a@]" (pp_list pp_transition) l
   in
-  (* run [A.next] at most [i] times, but stop if it finishes or a choice
-     must be made. *)
-  let rec do_next i =
-    if i<=0 then ()
-    else if !done_ then ()
-    else (
-      call_next_once_ ~on_choice:(fun l -> choices_ := l; pp_choices l);
-      if !choices_ = [] then do_next (i-1)
-    );
-  in
-  let rec do_auto i =
-    let auto_choice = function
-      | [] -> assert false
-      | (st',expl) :: _ ->
-        Fmt.printf "@[<2>@{<yellow>auto-choice@} %S to@ %a@]@." expl A.State.pp st';
-        choices_ := [];
-        cur_st_ := st';
-    in
-    match !choices_ with
-    | _ when i<0 -> ()
-    | _ when !done_ -> ()
-    | [] ->
-      (* do one step of [next], with automatic choice if needed *)
-      call_next_once_ ~on_choice:auto_choice;
-      do_auto (i-1)
-    | l ->
-      auto_choice l;
-      do_auto (i-1);
+  let pp_trace tr : unit =
+    let open R.Trace in
+    match tr.R.Trace.status with
+    | Stopped ->
+      Fmt.printf "@[<v>%a@,@[<2>@{<Green>done@} last state:@ %a@]@]@."
+        pp_transitions tr.transitions A.State.pp tr.final;
+    | Active ->
+      begin match tr.transitions with
+        | [] -> Fmt.printf "%a@." A.State.pp !cur_st_;
+        | _ -> Fmt.printf "@[<v>%a@]@." pp_transitions tr.transitions;
+      end;
+    | Error msg ->
+      Fmt.printf "@[<v>%a@,@{<Red>error@}: %s@]@." pp_transitions tr.transitions msg;
   in
   let rec loop () =
     match lnoise_input "> " |> CCOpt.map String.trim with
@@ -171,29 +157,40 @@ let repl ?(ats=default_ats) () =
       )
     | Cmd.Show ->
       Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
-      if !choices_ <> [] then pp_choices !choices_
+      CCOpt.iter pp_choices !choices_;
     | Cmd.Auto n ->
-      do_auto n
+      let trace, choices = R.run (R.Tactic.Auto n) !cur_st_ in
+      pp_trace trace;
+      cur_st_ := trace.R.Trace.final;
+      done_ := R.Trace.is_done trace;
+      choices_ := choices;
     | Cmd.Next _ when !done_ ->
       Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Next n when n <= 0 ->
       Fmt.printf "@{<Red>error@}: need positive integer, not %d@." n;
     | Cmd.Next n ->
-      do_next n
+      let trace, choices = R.run (R.Tactic.Next n) !cur_st_ in
+      pp_trace trace;
+      cur_st_ := trace.R.Trace.final;
+      done_ := R.Trace.is_done trace;
+      choices_ := choices;
+      CCOpt.iter pp_choices !choices_;
     | Cmd.Init st ->
       done_ := false;
-      choices_ := [];
+      choices_ := None;
       cur_st_ := st
     | Cmd.Pick i ->
-      begin match List.nth !choices_ i with
-        | (c,expl) ->
+      begin match !choices_, CCOpt.flat_map (fun l -> List.nth_opt l i) !choices_ with
+        | _, Some (c,expl) ->
           Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@."
             i expl A.State.pp c;
-          choices_ := [];
+          choices_ := None;
           cur_st_ := c;
-        | exception _ ->
+        | None, _ ->
+          Fmt.printf "@{<Red>error@}: no active choice list@."
+        | Some l, None ->
           Fmt.printf "@{<Red>error@}: invalid choice %d, must be in (0..%d)@."
-            i (List.length !choices_)
+            i (List.length l)
       end
   in
   loop ()
