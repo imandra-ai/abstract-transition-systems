@@ -36,10 +36,48 @@ module Clause = struct
        <* skip_white <* char ')')
 end
 
+module Trail = struct
+  type kind = Decision | Prop of Clause.t
+  type t =
+    | Nil
+    | Cons of {
+        kind: kind;
+        lit: Lit.t;
+        next: t;
+        _assign: bool Lit.Map.t lazy_t; (* assignment, from trail *)
+      }
+
+  let[@inline] assign = function
+    | Nil -> Lit.Map.empty
+    | Cons {_assign=lazy a;_} -> a
+
+  let empty = Nil
+  let cons kind (lit:Lit.t) (next:t) : t =
+    let _assign = lazy (
+      let a = assign next in
+      a |> Lit.Map.add lit true |> Lit.Map.add (-lit) false
+    ) in
+    Cons { kind; lit; next; _assign; }
+
+  let eval_to_false (self:t) (c:Clause.t) : bool =
+    let map = assign self in
+    Clause.for_all (fun l -> Lit.Map.get_or ~default:false (-l) map) c
+
+  let rec iter k = function
+    | Nil -> ()
+    | Cons {kind;lit;next;_} -> k (kind,lit); iter k next
+
+  let to_iter (tr:t) = fun k -> iter k tr
+
+  let pp_trail_elt out (k,lit) = match k with
+    | Decision -> Fmt.fprintf out "%a*" Lit.pp lit
+    | Prop _ -> Lit.pp out lit
+
+  let pp out (self:t) : unit =
+    Fmt.fprintf out "(@[%a@])" (pp_iter pp_trail_elt) (to_iter self)
+end
+
 module State = struct
-  type trail_kind = Decision | Prop of Clause.t
-  type trail_elt = trail_kind * Lit.t
-  type trail = trail_elt list
   type status =
     | Sat
     | Unsat
@@ -48,37 +86,26 @@ module State = struct
     | Searching
   type t = {
     cs: Clause.t list;
-    trail: trail;
+    trail: Trail.t;
     status: status;
-    _lvl: int lazy_t;
     _all_vars: Lit.Set.t lazy_t;
     _to_decide: Lit.Set.t lazy_t;
-    _assign: bool Lit.Map.t lazy_t; (* assignment, from trail *)
   }
 
   (* main constructor *)
-  let make (cs:Clause.t list) (trail:trail) status : t =
-    let _lvl = lazy
-      Iter.(of_list trail
-            |> filter (function (Decision,_) -> true | _ -> false) |> length)
-      in
+  let make (cs:Clause.t list) (trail:Trail.t) status : t =
     let _all_vars = lazy (
       Iter.(of_list cs |> flat_map Clause.lits |> map Lit.abs) |> Lit.Set.of_seq;
     ) in
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(of_list trail |> map snd |> map Lit.abs) |> Lit.Set.of_seq in
+        Iter.(Trail.to_iter trail |> map snd |> map Lit.abs) |> Lit.Set.of_seq in
       Lit.Set.diff all in_trail
     ) in
-    let _assign = lazy (
-      Iter.(of_list trail
-            |> map snd |> flat_map_l (fun i -> [i, true; -i, false]))
-      |> Lit.Map.of_seq
-    ) in
-    {cs;trail;status;_lvl; _all_vars; _to_decide; _assign}
+    {cs; trail; status; _all_vars; _to_decide }
 
-  let empty : t = make [] [] Searching
+  let empty : t = make [] Trail.empty Searching
 
   let pp_status out = function
     | Sat -> Fmt.string out "sat"
@@ -87,25 +114,16 @@ module State = struct
     | Conflict c -> Fmt.fprintf out "(@[conflict %a@])" Clause.pp c
     | Backjump c -> Fmt.fprintf out "(@[backjump %a@])" Clause.pp c
 
-  let pp_trail_elt out (k,lit) = match k with
-    | Decision -> Fmt.fprintf out "%a*" Lit.pp lit
-    | Prop _ -> Lit.pp out lit
-
   let pp out (self:t) : unit =
     Fmt.fprintf out
-      "(@[st @[:status@ %a@]@ @[:cs@ (@[%a@])@]@ @[:trail@ (@[%a@])@]@])"
-      pp_status self.status (pp_list Clause.pp) self.cs
-      (pp_list pp_trail_elt) self.trail
+      "(@[st @[:status@ %a@]@ @[:cs@ (@[%a@])@]@ @[:trail@ %a@]@])"
+      pp_status self.status (pp_list Clause.pp) self.cs Trail.pp self.trail
 
   let parse : t P.t =
     let open P in
     (skip_white *> char '(' *>
      parsing "clause list" (many Clause.parse <* skip_white) <* char ')')
-    >|= fun cs -> make cs [] Searching
-
-  let eval_to_false (self:t) (c:Clause.t) : bool =
-    let lazy assign = self._assign in
-    Clause.for_all (fun l -> Lit.Map.get_or ~default:false (-l) assign) c
+    >|= fun cs -> make cs Trail.empty Searching
 
   let resolve_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
@@ -114,22 +132,24 @@ module State = struct
       Some (One (make self.cs self.trail Unsat, "learnt false"))
     | Conflict c ->
       begin match self.trail with
-        | [] ->
+        | Trail.Nil ->
           Some (One (make self.cs self.trail Unsat, "empty trail")) (* unsat! *)
-        | (Prop d,lit)::trail' when Clause.contains (-lit) c ->
+        | Trail.Cons {kind=Prop d;lit;next;_} when Clause.contains (-lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (-lit) c) in
           let expl = Fmt.sprintf "resolve on %a with %a" Lit.pp lit Clause.pp d in
-          Some (One (make self.cs trail' (Conflict res), expl))
-        | (Prop _,_) :: trail' ->
-          Some (One (make self.cs trail' self.status, "consume"))
-        | (Decision, _) :: _ ->
+          Some (One (make self.cs next (Conflict res), expl))
+        | Trail.Cons {kind=Prop _; next; _} ->
+          Some (One (make self.cs next self.status, "consume"))
+        | Trail.Cons {kind=Decision; _} ->
           (* start backjumping *)
           Some (One (make self.cs self.trail (Backjump c), "backjump below conflict level"))
       end
     | _ -> None
 
+  (* TODO: instead of decision, use criterion about learnt clause becoming unit,
+     and then unwind to decision and propagate *)
   let backjump_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
@@ -138,23 +158,27 @@ module State = struct
     | Backjump c ->
       let rec unwind_trail trail =
         match trail with
-        | [] -> 
+        | Trail.Nil -> 
           Some (One (make self.cs self.trail Unsat, "empty trail")) (* unsat! *)
-        | (_,lit) :: _ when Clause.contains (-lit) c ->
+        | Trail.Cons {lit; _}
+          when Clause.contains (-lit) c
+            && Trail.eval_to_false trail (Clause.remove (-lit) c) ->
+          (* reached UIP *)
           let tr = unwind_till_next_decision trail in
           let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-          Some (One (make (c :: self.cs) ((Prop c,-lit)::tr) Searching, expl))
-        | _::trail' -> unwind_trail trail'
+          let trail = Trail.cons (Prop c) (-lit) tr in
+          Some (One (make (c :: self.cs) trail Searching, expl))
+        | Trail.Cons {next;_} -> unwind_trail next
       and unwind_till_next_decision = function
-        | [] -> []
-        | (Decision, _) :: tr -> tr
-        | (Prop _, _) :: tr -> unwind_till_next_decision tr
+        | Trail.Nil -> Trail.empty
+        | Trail.Cons {kind=Decision; next; _} -> next
+        | Trail.Cons {kind=Prop _;next; _} -> unwind_till_next_decision next
       in
       unwind_trail self.trail
     | _ -> None
 
   let find_unit_c (self:t) : (Clause.t * Lit.t) option =
-    let lazy assign = self._assign in
+    let assign = Trail.assign self.trail in
     Iter.of_list self.cs
     |> Iter.find_map
       (fun c ->
@@ -166,9 +190,10 @@ module State = struct
 
   let propagate self : _ ATS.step option =
     match find_unit_c self with
-    | Some (c,l) ->
-      let expl = Fmt.sprintf "propagate %a from %a" Lit.pp l Clause.pp c in
-      Some (ATS.One (make self.cs ((Prop c,l)::self.trail) Searching, expl))
+    | Some (c,lit) ->
+      let expl = Fmt.sprintf "propagate %a from %a" Lit.pp lit Clause.pp c in
+      let trail = Trail.cons (Prop c) lit self.trail in
+      Some (ATS.One (make self.cs trail Searching, expl))
     | None -> None
 
   let decide self : _ ATS.step option =
@@ -184,7 +209,7 @@ module State = struct
         |> Iter.flat_map_l
           (fun v ->
              let mk_ v =
-               make self.cs ((Decision,v) :: self.trail) Searching,
+               make self.cs (Trail.cons Decision v self.trail) Searching,
                Fmt.sprintf "decide %a" Lit.pp v
              in
              [mk_ v; mk_ (-v)])
@@ -194,7 +219,7 @@ module State = struct
     )
 
   let find_false (self:t) : _ option =
-    match CCList.find_opt (eval_to_false self) self.cs with
+    match CCList.find_opt (Trail.eval_to_false self.trail) self.cs with
     | None -> None
     | Some c ->
       (* conflict! *)
