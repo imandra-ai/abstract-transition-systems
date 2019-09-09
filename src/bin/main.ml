@@ -8,54 +8,51 @@ let ats_l : ATS.t list = [
 
 let default_ats = CDCL.ats
 
-module Cmd(A: ATS.S) = struct
-  type t =
-    | Quit
-    | Auto of int
-    | Next of int
-    | Show
-    | Help of string option
-    | Pick of int
-    | Init of A.State.t
+module Make(A: ATS.S) = struct
+  include Ats.Run.Make(A)
 
-  let all_ = [
-    "quit", " quits";
-    "show", " show current state";
-    "init", " <st> parse st and sets current state to it";
-    "next", " <n>? transition to next state (n times if provided)";
-    "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
-    "pick", " <i> pick state i in list of choices";
-    "help", " show help";
-  ]
+  module Cmd = struct
+    include Cmd0
 
-  (* command parser *)
-  let parse : t P.t =
-    let open P in
-    let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
-    skip_white *> parsing "command" (
-      (try_ (string "quit") *> return Quit)
-      <|> (try_ (string "show") *> return Show)
-      <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
-      <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
-      <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
-      <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
-      <|> (try_ (string "help") *> skip_white *>
-           ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
-           Help what)
-      <|> P.fail "invalid command"
-    ) <* skip_white
+    let all_ = [
+      "quit", " quits";
+      "show", " show current state";
+      "init", " <st> parse st and sets current state to it";
+      "next", " <n>? transition to next state (n times if provided)";
+      "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
+      "pick", " <i> pick state i in list of choices";
+      "help", " show help";
+    ]
 
-  let hints (s:string) : _ option =
-    match List.assoc (String.trim s) all_ with
-    | h -> Some (h, LNoise.Blue, false)
-    | exception _ -> None
+    (* command parser *)
+    let parse : t P.t =
+      let open P in
+      let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
+      skip_white *> parsing "command" (
+        (try_ (string "quit") *> return Quit)
+        <|> (try_ (string "show") *> return Show)
+        <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
+        <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
+        <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
+        <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
+        <|> (try_ (string "help") *> skip_white *>
+             ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
+             Help what)
+        <|> P.fail "invalid command"
+      ) <* skip_white
 
-  (* provide basic completions *)
-  let complete (s:string) : string list =
-    CCList.filter_map
-      (fun (cmd,_) ->
-         if CCString.prefix ~pre:s cmd then Some cmd else None)
-      all_
+    let hints (s:string) : _ option =
+      match List.assoc (String.trim s) all_ with
+      | h -> Some (h, LNoise.Blue, false)
+      | exception _ -> None
+
+    (* provide basic completions *)
+    let complete (s:string) : string list =
+      CCList.filter_map
+        (fun (cmd,_) ->
+           if CCString.prefix ~pre:s cmd then Some cmd else None)
+        all_
+  end
 end
 
 (* multi-line input if there are more "(" than ")" so far *)
@@ -78,7 +75,8 @@ let lnoise_input prompt : string option =
 
 let repl ?(ats=default_ats) () =
   let (module A) = ats in
-  let module Cmd = Cmd(A) in
+  let module R = Make(A) in
+  let module Cmd = R.Cmd in
   (* current state *)
   let cur_st_ = ref A.State.empty in
   let choices_ : (A.State.t * string) list ref = ref [] in
