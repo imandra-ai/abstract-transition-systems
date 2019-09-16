@@ -4,6 +4,7 @@ module ATS = ATS
 let ats_l : ATS.t list = [
   DPLL.ats;
   CDCL.ats;
+  MCSAT.ats;
 ]
 
 let default_ats = CDCL.ats

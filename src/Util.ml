@@ -11,3 +11,5 @@ exception Error of string
 
 let error e = raise (Error e)
 let errorf f = Fmt.kasprintf error f
+
+module Str_tbl = CCHashtbl.Make(CCString)
