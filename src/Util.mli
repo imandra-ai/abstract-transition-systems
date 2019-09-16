@@ -10,3 +10,4 @@ val error : string -> 'a
 val errorf : ('a, Format.formatter, unit, unit, unit, 'b) format6 -> 'a
 
 module Str_tbl : CCHashtbl.S with type key = string
+module Str_map : CCMap.S with type key = string

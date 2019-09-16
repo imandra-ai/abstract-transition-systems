@@ -18,6 +18,7 @@ let makef fmt = Fmt.ksprintf ~f:make fmt
 let copy {name;_} = make name
 
 let id {id;_} = id
+let name id = id.name
 let to_string id = id.name
 
 let equal a b = a.id=b.id
