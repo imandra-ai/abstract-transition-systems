@@ -18,16 +18,22 @@ module Make_cmd(A: ATS.S) = struct
     | Help of string option
     | Pick of int
     | Init of A.State.t
+    | Load of string
 
   let all_ = [
     "quit", " quits";
     "show", " show current state";
     "init", " <st> parse st and sets current state to it";
+    "load", " <file> parse state from given file and sets current state to it";
     "next", " <n>? transition to next state (n times if provided)";
     "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
     "pick", " <i> pick state i in list of choices";
     "help", " show help";
   ]
+
+  let parse_filename : string P.t =
+    let open P in
+    (try_ (P.char '"') *> P.chars_if (fun c -> c <> '"') <* char '"')
 
   (* command parser *)
   let parse : t P.t =
@@ -38,6 +44,7 @@ module Make_cmd(A: ATS.S) = struct
       <|> (try_ (string "show") *> return Show)
       <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
       <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
+      <|> (try_ (string "load") *> skip_white *> (parse_filename >|= fun f -> Load f))
       <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
       <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
       <|> (try_ (string "help") *> skip_white *>
@@ -180,6 +187,15 @@ let repl ?(ats=default_ats) () =
       done_ := false;
       choices_ := None;
       cur_st_ := st
+    | Cmd.Load filename ->
+      begin match P.parse_file A.State.parse filename with
+        | Ok st ->
+          done_ := false;
+          choices_ := None;
+          cur_st_ := st
+        | Error msg ->
+          Fmt.printf "@{<Red>error@}: cannot parse %S:\n%s@." filename msg
+      end
     | Cmd.Pick i ->
       begin match !choices_, CCOpt.flat_map (fun l -> List.nth_opt l i) !choices_ with
         | _, Some (c,expl) ->
