@@ -1,5 +1,6 @@
 open Util
 
+(** {2 Types} *)
 module Ty : sig
   type t
   type view = Bool | Rat | Unin of ID.t | Arrow of t * t
@@ -13,8 +14,13 @@ module Ty : sig
   val arrow_l : t list -> t -> t
   val open_ : t -> t list * t
   val pp : t Fmt.printer
+
+  val is_bool : t -> bool
+
   type env = t Str_map.t
   val parse : env -> t P.t
+
+  module Tbl : CCHashtbl.S with type key = t
 end = struct
   type t = {
     mutable id: int;
@@ -51,11 +57,15 @@ end = struct
   let unin id : t = mk_ @@ Unin id
   let arrow a b = mk_ @@ Arrow (a,b)
   let arrow_l a b = List.fold_right arrow a b
+
   let rec open_ ty = match view ty with
     | Arrow (a,b) ->
       let args, ret = open_ b in
       a :: args, ret
     | _ -> [], ty
+
+  let is_bool ty = match view ty with Bool -> true | _ -> false
+
   let rec pp out t = match view t with
     | Bool -> Fmt.string out "bool"
     | Rat -> Fmt.string out "rat"
@@ -82,8 +92,12 @@ end = struct
         | ret :: args -> arrow_l (List.rev args) ret)
        <* skip_white <* char ')')
       )
+
+  module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
+  module Tbl = CCHashtbl.Make(As_key)
 end
 
+(** {2 Typed Constants} *)
 module Var : sig
   type t = {id: ID.t; ty: Ty.t}
   val make : ID.t -> Ty.t -> t
@@ -114,6 +128,69 @@ end = struct
   let parse env : t P.t =
     let open P.Infix in
     P.try_ P.U.word >>= parse_string env
+end
+
+(** {2 Semantic Values} *)
+module Value : sig
+  type t = Bool of bool | Unin of Var.t
+
+  val ty : t -> Ty.t
+  val pp : t Fmt.printer
+
+  val equal : t -> t -> bool
+  val hash : t -> int
+  val ty : t -> Ty.t
+
+  val is_bool : t -> bool
+  val bool : bool -> t
+  val not_ : t -> t
+  val true_ : t
+  val false_ : t
+  val unin_var : Var.t -> t
+  val unin : Ty.t -> int -> t (* from counter + type *)
+end = struct
+  type t =  Bool of bool | Unin of Var.t
+
+  let ty = function Bool _ -> Ty.bool | Unin v -> Var.ty v
+  let pp out = function
+    | Bool b -> Fmt.bool out b
+    | Unin v -> Var.pp out v
+
+  let bool b = Bool b
+  let true_ = bool true
+  let false_ = bool false
+  let unin_var v : t = Unin v
+  let is_bool = function Bool _ -> true | _ -> false
+  let equal a b = match a, b with
+    | Bool a, Bool b -> a=b
+    | Unin a, Unin b -> Var.equal a b
+    | (Bool _ | Unin _), _ -> false
+  let hash = function
+    | Bool b -> CCHash.(combine2 10 (bool b))
+    | Unin v -> CCHash.(combine2 20 (Var.hash v))
+
+  let not_ = function
+    | Bool b -> bool (not b)
+    | v -> Util.errorf "cannot negate value %a" pp v
+
+  let unin =
+    let tbl : t list Ty.Tbl.t = Ty.Tbl.create 32 in
+    fun ty i ->
+      let l = Ty.Tbl.get_or ~default:[] tbl ty in
+      let len_l = List.length l in
+      let n_missing = i - len_l in
+      if n_missing < 0 then (
+        List.nth l i
+      ) else (
+        (* extend list *)
+        let extend =
+          CCList.init (n_missing+1)
+            (fun i -> unin_var @@ Var.make (ID.makef "$%a_%d" Ty.pp ty (i+len_l)) ty)
+        in
+        let l = l @ extend in
+        Ty.Tbl.replace tbl ty l;
+        List.nth l i
+      )
 end
 
 module Env = struct
@@ -151,6 +228,7 @@ module Env = struct
     Fmt.fprintf out "(@[%a@])" (Util.pp_iter pp_item) (to_iter self)
 end
 
+(** {2 Terms} *)
 module Term : sig
   type t
   type view =
@@ -174,6 +252,10 @@ module Term : sig
   val neq : t -> t -> t
   val not_ : t -> t
   val abs : t -> t
+  val sign : t -> bool
+
+  val sub : t -> t Iter.t
+  val is_bool : t -> bool (** Has boolean type? *)
 
   val pp : t Fmt.printer
 
@@ -199,6 +281,18 @@ end = struct
   let equal a b = a.id=b.id
   let compare a b = CCInt.compare a.id b.id
   let hash a = CCHash.int a.id
+
+  let is_bool t = Ty.is_bool (ty t)
+
+  let sub t k =
+    let rec aux t =
+      k t;
+      match view t with
+      | Bool _ | App (_, []) -> ()
+      | App (_, l) -> List.iter aux l
+      | Eq (a,b) -> aux a; aux b
+      | Not u -> aux u
+    in aux t
 
   module H = Hashcons.Make(struct
       type nonrec t = t
@@ -282,6 +376,11 @@ end = struct
     | Not u -> u
     | _ -> t
 
+  let sign t = match view t with
+    | Bool b -> b
+    | Not _ -> false
+    | _ -> true
+
   module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
 
   module Set = CCSet.Make(As_key)
@@ -309,24 +408,23 @@ end = struct
       )
 end
 
-module Lit = Term
-
+(** {2 Disjunction of boolean terms} *)
 module Clause = struct
-  type t = Lit.Set.t
+  type t = Term.Set.t
   let pp out c =
-    if Lit.Set.cardinal c = 1
-    then Lit.pp out (Lit.Set.choose c)
-    else Fmt.fprintf out "(@[or@ %a@])" (pp_list Lit.pp) (Lit.Set.to_list c)
-  let is_empty = Lit.Set.is_empty
-  let contains l c = Lit.Set.mem l c
-  let remove l c : t = Lit.Set.remove l c
-  let union = Lit.Set.union
-  let lits c = Lit.Set.to_seq c
-  let for_all = Lit.Set.for_all
-  let filter = Lit.Set.filter
-  let of_list = Lit.Set.of_list
+    if Term.Set.cardinal c = 1
+    then Term.pp out (Term.Set.choose c)
+    else Fmt.fprintf out "(@[or@ %a@])" (pp_list Term.pp) (Term.Set.to_list c)
+  let is_empty = Term.Set.is_empty
+  let contains l c = Term.Set.mem l c
+  let remove l c : t = Term.Set.remove l c
+  let union = Term.Set.union
+  let lits c = Term.Set.to_seq c
+  let for_all = Term.Set.for_all
+  let filter = Term.Set.filter
+  let of_list = Term.Set.of_list
 
-  let as_unit c = match Lit.Set.choose_opt c with
+  let as_unit c = match Term.Set.choose_opt c with
     | None -> None
     | Some lit ->
       let c' = remove lit c in
@@ -336,37 +434,49 @@ module Clause = struct
     let open P in
     skip_white *> parsing "clause" (
       (try_ (char '(' *> string "or") *> skip_white *>
-       (many (try_ (Lit.parse env) <* skip_white) <* char ')' >|= Lit.Set.of_list)) <|>
-      (Lit.parse env >|= Lit.Set.singleton)
+       (many (try_ (Term.parse env) <* skip_white) <* char ')' >|= Term.Set.of_list)) <|>
+      (Term.parse env >|= Term.Set.singleton)
     )
 end
 
 module Trail = struct
-  type kind = Decision | Prop of Clause.t
+  type kind = Decision of Value.t | BCP of Clause.t
   type t =
     | Nil
     | Cons of {
         kind: kind;
-        lit: Lit.t;
+        lit: Term.t;
         next: t;
-        _assign: bool Lit.Map.t lazy_t; (* assignment, from trail *)
+        _assign: Value.t Term.Map.t lazy_t; (* assignment, from trail *)
       }
 
   let[@inline] assign = function
-    | Nil -> Lit.Map.empty
+    | Nil -> Term.Map.empty
     | Cons {_assign=lazy a;_} -> a
 
-  let empty = Nil
-  let cons kind (lit:Lit.t) (next:t) : t =
+  let cons kind (lit:Term.t) (value:Value.t) (next:t) : t =
     let _assign = lazy (
       let a = assign next in
-      a |> Lit.Map.add lit true |> Lit.Map.add (Lit.not_ lit) false
+      if Value.is_bool value then (
+        a |> Term.Map.add lit value
+        |> Term.Map.add (Term.not_ lit) (Value.not_ value)
+      ) else (
+        a |> Term.Map.add lit value
+      )
     ) in
     Cons { kind; lit; next; _assign; }
 
+  let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
+  let empty = cons (BCP unit_true) Term.true_ Value.true_ Nil
+
   let eval_to_false (self:t) (c:Clause.t) : bool =
     let map = assign self in
-    Clause.for_all (fun l -> Lit.Map.get_or ~default:false (Lit.not_ l) map) c
+    Clause.for_all
+      (fun l ->
+         match Term.Map.get l map with
+         | Some (Value.Bool false) -> true
+         | _ -> false)
+      c
 
   let rec iter k = function
     | Nil -> ()
@@ -375,8 +485,11 @@ module Trail = struct
   let to_iter (tr:t) = fun k -> iter k tr
 
   let pp_trail_elt out (k,lit) = match k with
-    | Decision -> Fmt.fprintf out "%a*" Lit.pp lit
-    | Prop _ -> Lit.pp out lit
+    | Decision v when Value.is_bool v ->
+      Fmt.fprintf out "(@[%a*@ <- %b@])" Term.pp (Term.abs lit) (Term.sign lit)
+    | Decision v -> Fmt.fprintf out "(@[%a*@ <- %a@])" Term.pp lit Value.pp v
+    | BCP _ ->
+      Fmt.fprintf out "(@[%a@ <- %b@])" Term.pp (Term.abs lit) (Term.sign lit)
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -394,20 +507,23 @@ module State = struct
     cs: Clause.t list;
     trail: Trail.t;
     status: status;
-    _all_vars: Lit.Set.t lazy_t;
-    _to_decide: Lit.Set.t lazy_t;
+    _all_vars: Term.Set.t lazy_t;
+    _to_decide: Term.Set.t lazy_t;
   }
 
   (* main constructor *)
   let make (env:Env.t) (cs:Clause.t list) (trail:Trail.t) status : t =
     let _all_vars = lazy (
-      Iter.(of_list cs |> flat_map Clause.lits |> map Lit.abs) |> Lit.Set.of_seq;
+      Iter.(
+        of_list cs
+        |> flat_map Clause.lits |> flat_map Term.sub |> map Term.abs)
+      |> Term.Set.of_seq;
     ) in
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(Trail.to_iter trail |> map snd |> map Lit.abs) |> Lit.Set.of_seq in
-      Lit.Set.diff all in_trail
+        Iter.(Trail.to_iter trail |> map snd |> map Term.abs) |> Term.Set.of_seq in
+      Term.Set.diff all in_trail
     ) in
     { env; cs; trail; status;
       _all_vars; _to_decide }
@@ -468,15 +584,15 @@ module State = struct
       begin match self.trail with
         | Trail.Nil ->
           Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
-        | Trail.Cons {kind=Prop d;lit;next;_} when Clause.contains (Lit.not_ lit) c ->
+        | Trail.Cons {kind=BCP d;lit;next;_} when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
-          let res = Clause.union (Clause.remove lit d) (Clause.remove (Lit.not_ lit) c) in
-          let expl = Fmt.sprintf "resolve on %a with %a" Lit.pp lit Clause.pp d in
+          let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
+          let expl = Fmt.sprintf "resolve on %a with %a" Term.pp lit Clause.pp d in
           Some (One (make self.env self.cs next (Conflict res), expl))
-        | Trail.Cons {kind=Prop _; next; _} ->
+        | Trail.Cons {kind=BCP _; next; _} ->
           Some (One (make self.env self.cs next self.status, "consume"))
-        | Trail.Cons {kind=Decision; _} ->
+        | Trail.Cons {kind=Decision _; _} ->
           (* start backjumping *)
           Some (One (make self.env self.cs self.trail (Backjump c), "backjump below conflict level"))
       end
@@ -495,58 +611,67 @@ module State = struct
         | Trail.Nil -> 
           Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
         | Trail.Cons {lit; _}
-          when Clause.contains (Lit.not_ lit) c
-            && Trail.eval_to_false trail (Clause.remove (Lit.not_ lit) c) ->
+          when Clause.contains (Term.not_ lit) c
+            && Trail.eval_to_false trail (Clause.remove (Term.not_ lit) c) ->
           (* reached UIP *)
           let tr = unwind_till_next_decision trail in
           let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-          let trail = Trail.cons (Prop c) (Lit.not_ lit) tr in
+          let trail = Trail.cons (BCP c) lit Value.false_ tr in
           Some (One (make self.env (c :: self.cs) trail Searching, expl))
         | Trail.Cons {next;_} -> unwind_trail next
       and unwind_till_next_decision = function
         | Trail.Nil -> Trail.empty
-        | Trail.Cons {kind=Decision; next; _} -> next
-        | Trail.Cons {kind=Prop _;next; _} -> unwind_till_next_decision next
+        | Trail.Cons {kind=Decision _; next; _} -> next
+        | Trail.Cons {kind=BCP _;next; _} -> unwind_till_next_decision next
       in
       unwind_trail self.trail
     | _ -> None
 
-  let find_unit_c (self:t) : (Clause.t * Lit.t) option =
+  let find_unit_c (self:t) : (Clause.t * Term.t) option =
     let assign = Trail.assign self.trail in
     Iter.of_list self.cs
     |> Iter.find_map
       (fun c ->
          (* non-false lits *)
-         let c' = Clause.filter (fun l -> Lit.Map.get l assign <> Some false) c in
+         let c' =
+           Clause.filter
+             (fun l -> match Term.Map.get l assign with
+                | Some (Value.Bool false) -> false
+                | _ -> true)
+             c
+         in
          match Clause.as_unit c' with
-         | Some l when not (Lit.Map.mem l assign) -> Some (c,l)
+         | Some l when not (Term.Map.mem l assign) -> Some (c,l)
          | _ -> None)
 
   let propagate self : _ ATS.step option =
     match find_unit_c self with
     | Some (c,lit) ->
-      let expl = Fmt.sprintf "propagate %a from %a" Lit.pp lit Clause.pp c in
-      let trail = Trail.cons (Prop c) lit self.trail in
+      let expl = Fmt.sprintf "propagate %a from %a" Term.pp lit Clause.pp c in
+      let trail = Trail.cons (BCP c) lit Value.true_ self.trail in
       Some (ATS.One (make self.env self.cs trail Searching, expl))
     | None -> None
 
   let decide self : _ ATS.step option =
     (* try to decide *)
     let lazy vars = self._to_decide in
-    if Lit.Set.is_empty vars then (
+    if Term.Set.is_empty vars then (
       (* full model, we're done! *)
       Some (ATS.Done (make self.env self.cs self.trail Sat, "all vars decided"))
     ) else (
       (* multiple possible decisions *)
       let decs =
-        Lit.Set.to_seq vars
+        Term.Set.to_seq vars
         |> Iter.flat_map_l
           (fun v ->
-             let mk_ v =
-               make self.env self.cs (Trail.cons Decision v self.trail) Searching,
-               Fmt.sprintf "decide %a" Lit.pp v
+             let mk_ v value =
+               make self.env self.cs
+                 (Trail.cons (Decision value) v value self.trail) Searching,
+               Fmt.sprintf "decide %a <- %a" Term.pp v Value.pp value
              in
-             [mk_ v; mk_ (Lit.not_ v)])
+             (* TODO: keep impossible values for non-bool variables *)
+             if Term.is_bool v then [mk_ v Value.true_; mk_ v Value.false_]
+             else [mk_ v @@ Value.unin (Term.ty v) 0])
         |> Iter.to_rev_list
       in
       Some (ATS.Choice decs)
