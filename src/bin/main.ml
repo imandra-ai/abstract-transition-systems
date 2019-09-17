@@ -104,8 +104,8 @@ let repl ?(ats=default_ats) () =
     Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
       (Util.pp_list
          Fmt.(within "(" ")" @@ hbox @@ pair ~sep:(return ": ") int
-                (pair ~sep:(return " by@ ") A.State.pp string_quoted)))
-      (CCList.mapi CCPair.make l);
+                (pair ~sep:(return " yielding@ ") string_quoted A.State.pp)))
+      (CCList.mapi (fun i (x,by_) -> i, (by_, x)) l);
   in
   let rec pp_transition out tr =
     let open R.Transition in
