@@ -105,12 +105,14 @@ module Var : sig
   val name : t -> string
   val ty : t -> Ty.t
   val equal : t -> t -> bool
+  val compare : t -> t -> int
   val hash : t -> int
   val pp : t Fmt.printer
 
   type env = t Str_map.t
   val parse : env -> t P.t
   val parse_string : env -> string -> t P.t
+  module Map : CCMap.S with type key = t
 end = struct
   type t = {id: ID.t; ty: Ty.t}
   let id v = v.id
@@ -118,6 +120,7 @@ end = struct
   let name v = ID.name @@ id v
   let make id ty : t = {id; ty}
   let equal a b = ID.equal a.id b.id
+  let compare a b = ID.compare a.id b.id
   let hash a = ID.hash a.id
   let pp out a = ID.pp_name out a.id
 
@@ -128,6 +131,9 @@ end = struct
   let parse env : t P.t =
     let open P.Infix in
     P.try_ P.U.word >>= parse_string env
+
+  module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
+  module Map = CCMap.Make(As_key)
 end
 
 (** {2 Semantic Values} *)
@@ -139,6 +145,7 @@ module Value : sig
 
   val equal : t -> t -> bool
   val hash : t -> int
+  val compare : t -> t -> int
   val ty : t -> Ty.t
 
   val is_bool : t -> bool
@@ -165,6 +172,12 @@ end = struct
     | Bool a, Bool b -> a=b
     | Unin a, Unin b -> Var.equal a b
     | (Bool _ | Unin _), _ -> false
+  let compare a b =
+    let to_int_ = function Bool _ -> 1 | Unin _ -> 2 in
+    match a, b with
+    | Bool a, Bool b -> CCBool.compare a b
+    | Unin a, Unin b -> Var.compare a b
+    | (Bool _ | Unin _), _ -> CCInt.compare (to_int_ a) (to_int_ b)
   let hash = function
     | Bool b -> CCHash.(combine2 10 (bool b))
     | Unin v -> CCHash.(combine2 20 (Var.hash v))
@@ -408,6 +421,13 @@ end = struct
       )
 end
 
+module SigMap = CCMap.Make(struct
+    type t = Var.t * Value.t list
+    let compare (f1,l1) (f2,l2) =
+      if Var.equal f1 f2 then CCList.compare Value.compare l1 l2
+      else Var.compare f1 f2
+  end)
+
 (** {2 Disjunction of boolean terms} *)
 module Clause = struct
   type t = Term.Set.t
@@ -440,12 +460,13 @@ module Clause = struct
 end
 
 module Trail = struct
-  type kind = Decision of Value.t | BCP of Clause.t
+  type kind = Decision | BCP of Clause.t
   type t =
     | Nil
     | Cons of {
         kind: kind;
         lit: Term.t;
+        value: Value.t;
         next: t;
         _assign: Value.t Term.Map.t lazy_t; (* assignment, from trail *)
       }
@@ -464,7 +485,7 @@ module Trail = struct
         a |> Term.Map.add lit value
       )
     ) in
-    Cons { kind; lit; next; _assign; }
+    Cons { kind; lit; value; next; _assign; }
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty = cons (BCP unit_true) Term.true_ Value.true_ Nil
@@ -480,14 +501,16 @@ module Trail = struct
 
   let rec iter k = function
     | Nil -> ()
-    | Cons {kind;lit;next;_} -> k (kind,lit); iter k next
+    | Cons {kind;lit;value;next;_} -> k (kind,lit,value); iter k next
 
-  let to_iter (tr:t) = fun k -> iter k tr
+  let to_iter (tr:t) : (kind * Term.t * Value.t) Iter.t = fun k -> iter k tr
+  let iter_terms (tr:t) : Term.t Iter.t = to_iter tr |> Iter.map (fun (_,t,_) -> t)
+  let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,t,v) -> t,v)
 
-  let pp_trail_elt out (k,lit) = match k with
-    | Decision v when Value.is_bool v ->
+  let pp_trail_elt out (k,lit,v) = match k with
+    | Decision when Value.is_bool v ->
       Fmt.fprintf out "(@[%a*@ <- %b@])" Term.pp (Term.abs lit) (Term.sign lit)
-    | Decision v -> Fmt.fprintf out "(@[%a*@ <- %a@])" Term.pp lit Value.pp v
+    | Decision -> Fmt.fprintf out "(@[%a*@ <- %a@])" Term.pp lit Value.pp v
     | BCP _ ->
       Fmt.fprintf out "(@[%a@ <- %b@])" Term.pp (Term.abs lit) (Term.sign lit)
 
@@ -509,7 +532,50 @@ module State = struct
     status: status;
     _all_vars: Term.Set.t lazy_t;
     _to_decide: Term.Set.t lazy_t;
+    _uf_forbid: Value.t list Term.Map.t lazy_t; (* incompatibility table for UF *)
+    _uf_sigs: Value.t SigMap.t lazy_t; (* signature table for UF *)
   }
+
+  let[@inline] all_vars self = Lazy.force self._all_vars
+  let[@inline] to_decide self = Lazy.force self._to_decide
+  let[@inline] uf_forbid self = Lazy.force self._uf_forbid
+  let[@inline] uf_sigs self = Lazy.force self._uf_sigs
+
+  (* compute incompatibilities, by looking for [a=b <- false]
+     where [a] has a value already but [b] doesn't *)
+  let compute_uf_forbid trail : _ Term.Map.t =
+    let ass = Trail.assign trail in
+    let is_ass x = Term.Map.mem x ass in
+    (* pairs of impossible assignments *)
+    let pairs : (Term.t * Value.t) list =
+      Trail.iter_ass trail
+      |> Iter.filter_map
+        (fun (t,v) -> match Term.view t, v with
+           | Term.Eq (a,b), Value.Bool false when is_ass a && not (is_ass b) ->
+             Some (b, Term.Map.find a ass)
+           | Term.Eq (a,b), Value.Bool false when is_ass b && not (is_ass a) ->
+             Some (a, Term.Map.find b ass)
+           | _ -> None)
+      |> Iter.to_rev_list
+    in
+    List.fold_left
+      (fun m (t,v) ->
+         let l = v :: Term.Map.get_or ~default:[] t m in
+         Term.Map.add t l m)
+      Term.Map.empty pairs
+
+  (* compute signatures, by looking at terms [f t1…tn <- v] where each [t_i]
+     also has a value *)
+  let compute_uf_sigs trail =
+    let ass = Trail.assign trail in
+    let is_ass x = Term.Map.mem x ass in
+    Trail.iter_ass trail
+    |> Iter.filter_map
+      (fun (t,v) -> match Term.view t with
+         | Term.App (f, l) when List.for_all is_ass l ->
+           Some ((f, List.map (fun x->Term.Map.find x ass) l), v)
+         | _ -> None)
+    |> SigMap.of_seq
 
   (* main constructor *)
   let make (env:Env.t) (cs:Clause.t list) (trail:Trail.t) status : t =
@@ -522,11 +588,12 @@ module State = struct
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(Trail.to_iter trail |> map snd |> map Term.abs) |> Term.Set.of_seq in
+        Iter.(Trail.iter_terms trail |> map Term.abs) |> Term.Set.of_seq in
       Term.Set.diff all in_trail
     ) in
-    { env; cs; trail; status;
-      _all_vars; _to_decide }
+    let _uf_sigs = lazy (compute_uf_sigs trail) in
+    let _uf_forbid = lazy (compute_uf_forbid trail) in
+    { env; cs; trail; status; _all_vars; _to_decide; _uf_sigs; _uf_forbid; }
 
   let empty : t = make Env.empty [] Trail.empty Searching
 
@@ -592,7 +659,7 @@ module State = struct
           Some (One (make self.env self.cs next (Conflict res), expl))
         | Trail.Cons {kind=BCP _; next; _} ->
           Some (One (make self.env self.cs next self.status, "consume"))
-        | Trail.Cons {kind=Decision _; _} ->
+        | Trail.Cons {kind=Decision; _} ->
           (* start backjumping *)
           Some (One (make self.env self.cs self.trail (Backjump c), "backjump below conflict level"))
       end
@@ -621,7 +688,7 @@ module State = struct
         | Trail.Cons {next;_} -> unwind_trail next
       and unwind_till_next_decision = function
         | Trail.Nil -> Trail.empty
-        | Trail.Cons {kind=Decision _; next; _} -> next
+        | Trail.Cons {kind=Decision; next; _} -> next
         | Trail.Cons {kind=BCP _;next; _} -> unwind_till_next_decision next
       in
       unwind_trail self.trail
@@ -654,7 +721,7 @@ module State = struct
 
   let decide self : _ ATS.step option =
     (* try to decide *)
-    let lazy vars = self._to_decide in
+    let vars = to_decide self in
     if Term.Set.is_empty vars then (
       (* full model, we're done! *)
       Some (ATS.Done (make self.env self.cs self.trail Sat, "all vars decided"))
@@ -666,7 +733,7 @@ module State = struct
           (fun v ->
              let mk_ v value =
                make self.env self.cs
-                 (Trail.cons (Decision value) v value self.trail) Searching,
+                 (Trail.cons Decision v value self.trail) Searching,
                Fmt.sprintf "decide %a <- %a" Term.pp v Value.pp value
              in
              (* TODO: keep impossible values for non-bool variables *)
