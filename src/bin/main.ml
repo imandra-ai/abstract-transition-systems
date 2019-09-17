@@ -148,7 +148,12 @@ let repl ?(ats=default_ats) () =
       | Ok Cmd.Quit -> () (* exit *)
       | Ok cmd ->
         LNoise.history_add s |> ignore; (* save cmd *)
-        process_cmd cmd;
+        begin
+          try
+            process_cmd cmd;
+          with Util.Error msg ->
+            Fmt.printf "@{<Red>error@}: %s@." msg;
+        end;
         loop();
   and process_cmd = function
     | Cmd.Quit -> assert false
