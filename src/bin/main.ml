@@ -27,6 +27,7 @@ module Make_cmd(A: ATS.S) = struct
     "load", " <file> parse state from given file and sets current state to it";
     "next", " <n>? transition to next state (n times if provided)";
     "auto", " <n?> run next|pick in a loop, automatically (n times if provided)";
+    "step", " same as `auto 1`";
     "pick", " <i> pick state i in list of choices";
     "help", " show help";
   ]
@@ -43,6 +44,7 @@ module Make_cmd(A: ATS.S) = struct
       (try_ (string "quit") *> return Quit)
       <|> (try_ (string "show") *> return Show)
       <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
+      <|> (try_ (string "step") *> return (Auto 1))
       <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
       <|> (try_ (string "load") *> skip_white *> (parse_filename >|= fun f -> Load f))
       <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
@@ -108,11 +110,13 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
   LNoise.set_hints_callback Cmd.hints;
   (* print active list of choices *)
   let pp_choices l =
+    let pp1 out (i,(st,expl)) =
+      Fmt.fprintf out "(@[<hv>@{<Green>*@}[%d] \"@[%a@]\" yielding:@ %a@])"
+        i Fmt.text expl A.State.pp st
+    in
     Fmt.printf "@[<v2>@{<yellow>choices@}:@ %a@]@."
-      (Util.pp_list
-         Fmt.(within "(" ")" @@ hbox @@ pair ~sep:(return ": ") int
-                (pair ~sep:(return " yielding@ ") string_quoted A.State.pp)))
-      (CCList.mapi (fun i (x,by_) -> i, (by_, x)) l);
+      (Util.pp_list pp1)
+      (CCList.mapi (fun i x -> i,x) l);
   in
   let rec pp_transition out tr =
     let open R.Transition in
@@ -153,7 +157,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
         Fmt.printf "@{<Red>error@}: invalid command: %s@." msg;
         loop()
       | Ok l ->
-        Format.printf "cmds: [@[%a@]]@." (Util.pp_list ~sep:"; " Cmd.pp) l;
+        (* Format.printf "cmds: [@[%a@]]@." (Util.pp_list ~sep:"; " Cmd.pp) l; *)
         LNoise.history_add s |> ignore; (* save cmd *)
         process_cmds l
   and process_cmds = function
@@ -253,6 +257,7 @@ let () =
      Printf.sprintf " choose transition system (default %s)" (ATS.name default_ats));
     ("-nc", Arg.Clear color_, " disable colors");
     ("-e", Arg.String (CCList.Ref.push cmds_), " execute given commands");
+    ("--pp-id", Arg.Set ID._pp_full, " print full IDs");
   ] |> Arg.align
   in
   Arg.parse opts (fun _ -> ()) "usage: ats [option*]";

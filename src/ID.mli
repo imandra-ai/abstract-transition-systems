@@ -20,7 +20,10 @@ val equal : t -> t -> bool
 val hash : t -> int
 val compare : t -> t -> int
 val pp : t Fmt.printer
+val pp_full : t Fmt.printer
 val pp_name : t Fmt.printer
+
+val _pp_full : bool ref
 
 module Map : CCMap.S with type key = t
 module Set : CCSet.S with type elt = t
