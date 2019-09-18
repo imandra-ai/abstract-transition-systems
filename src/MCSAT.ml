@@ -757,6 +757,10 @@ module State = struct
       Some (ATS.One (make self.env self.cs trail Searching, expl))
     | None -> None
 
+  let is_searching self = match self.status with
+    | Searching -> true
+    | _ -> false
+
   let decide self : _ ATS.step option =
     (* try to decide *)
     let vars = to_decide self in
@@ -865,6 +869,9 @@ module State = struct
         Some (ATS.Choice choices)
     end
 
+  let if_searching f self =
+    if is_searching self then f self else None
+
   let is_done (self:t) =
     match self.status with
     | Sat | Unsat -> Some (ATS.Done (self, "done"))
@@ -873,9 +880,11 @@ module State = struct
   let rules : _ ATS.rule list list = [
     [is_done];
     [resolve_conflict_; backjump_];
-    [find_false_clause; find_uf_domain_conflict; find_uf_eval_conflict];
-    [propagate];
-    [decide];
+    [if_searching find_false_clause;
+     if_searching find_uf_domain_conflict;
+     if_searching find_uf_eval_conflict];
+    [if_searching propagate];
+    [if_searching decide];
   ]
 end
 
