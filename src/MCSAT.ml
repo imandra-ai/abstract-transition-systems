@@ -69,7 +69,7 @@ end = struct
   let rec pp out t = match view t with
     | Bool -> Fmt.string out "bool"
     | Rat -> Fmt.string out "rat"
-    | Unin id -> ID.pp_name out id
+    | Unin id -> ID.pp out id
     | Arrow (a,b) -> Fmt.fprintf out "(@[->@ %a@ %a@])" pp a pp b
 
   type env = t Str_map.t
@@ -122,7 +122,7 @@ end = struct
   let equal a b = ID.equal a.id b.id
   let compare a b = ID.compare a.id b.id
   let hash a = ID.hash a.id
-  let pp out a = ID.pp_name out a.id
+  let pp out a = ID.pp out a.id
 
   type env = t Str_map.t
   let parse_string env s =
@@ -428,6 +428,8 @@ module SigMap = CCMap.Make(struct
       else Var.compare f1 f2
   end)
 
+type assignment = Value.t Term.Map.t
+
 (** {2 Disjunction of boolean terms} *)
 module Clause = struct
   type t = Term.Set.t
@@ -459,11 +461,44 @@ module Clause = struct
        (many (try_ (Term.parse env) <* skip_white) <* char ')' >|= Term.Set.of_list)) <|>
       (Term.parse env >|= Term.Set.singleton)
     )
+
+  (* semantic evaluation *)
+  let rec eval_lit_semantic (ass:assignment) (t:Term.t) : bool option =
+    match Term.view t with
+    | Term.Eq (a,b) ->
+      begin match Term.Map.get a ass, Term.Map.get b ass with
+        | Some va, Some vb -> Some (Value.equal va vb)
+        | _ -> None
+      end
+    | Term.Not u ->
+      CCOpt.map not (eval_lit_semantic ass u)
+    | _ -> None
+
+  (* semantic + trail evaluation *)
+  let eval_lit (ass:assignment) (t:Term.t) : bool option =
+    match Term.Map.get t ass with
+    | Some (Value.Bool b) -> Some b
+    | Some _ -> assert false
+    | None -> eval_lit_semantic ass t
+
+  (* can [t] eval to false? *)
+  let lit_eval_to_false (ass:assignment) (t:Term.t) : bool =
+    match Term.Map.get t ass, eval_lit_semantic ass t with
+    | Some (Value.Bool false), _ | _, Some false -> true
+    | _ -> false
+
+  (* remove all literals that somehow evaluate to false *)
+  let filter_false (ass:assignment) (c:t) : t =
+    filter
+      (fun t -> not (lit_eval_to_false ass t))
+      c
+
+  let eval_to_false (ass:assignment) (c:t) : bool =
+    for_all (fun t -> lit_eval_to_false ass t) c
 end
 
 module Trail = struct
   type kind = Decision | BCP of Clause.t | Eval
-  type assignment = Value.t Term.Map.t
   type t =
     | Nil
     | Cons of {
@@ -495,15 +530,6 @@ module Trail = struct
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty = cons (BCP unit_true) Term.true_ Value.true_ Nil
-
-  let eval_to_false (self:t) (c:Clause.t) : bool =
-    let map = assign self in
-    Clause.for_all
-      (fun l ->
-         match Term.Map.get l map with
-         | Some (Value.Bool false) -> true
-         | _ -> false)
-      c
 
   let rec iter k = function
     | Nil -> ()
@@ -551,11 +577,13 @@ module State = struct
     | Conflict_uf of conflict_uf
     | Backjump of Clause.t
     | Searching
+
   type uf_domain =
     | UFD_forced of Value.t * Term.t
     | UFD_forbid of (Value.t * Term.t) list
     | UFD_conflict_forbid of Value.t * Term.t * Term.t
     | UFD_conflict_forced2 of Value.t * Term.t  * Value.t * Term.t 
+
   type t = {
     env: Env.t;
     cs: Clause.t list;
@@ -714,32 +742,6 @@ module State = struct
 
   (* ######### *)
 
-  (* semantic evaluation *)
-  let eval_lit_semantic (ass:Trail.assignment) (t:Term.t) : bool option =
-    match Term.view t with
-    | Term.Eq (a,b) ->
-      begin match Term.Map.get a ass, Term.Map.get b ass with
-        | Some va, Some vb -> Some (Value.equal va vb)
-        | _ -> None
-      end
-    | _ -> None
-
-  (* semantic + trail evaluation *)
-  let eval_lit (ass:Trail.assignment) (t:Term.t) : bool option =
-    match Term.Map.get t ass with
-    | Some (Value.Bool b) -> Some b
-    | Some _ -> assert false
-    | None -> eval_lit_semantic ass t
-
-  (* remove all literals that somehow evaluate to false *)
-  let clause_filter_false (assign:Trail.assignment) (c:Clause.t) : Clause.t =
-    Clause.filter
-      (fun l ->
-         match Term.Map.get l assign, eval_lit_semantic assign l with
-         | Some (Value.Bool false), _ | _, Some false -> false
-         | _ -> true)
-      c
-
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
@@ -777,7 +779,7 @@ module State = struct
           Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
         | Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
           assert (kind=Decision);
-          let c_reduced = clause_filter_false (Trail.assign next) c in
+          let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
             (* TODO: it might be more subtle, this should only happen
                at level 0 *)
@@ -804,7 +806,8 @@ module State = struct
           )
         | Trail.Cons {lit; _}
           when Clause.contains (Term.not_ lit) c
-            && Trail.eval_to_false trail (Clause.remove (Term.not_ lit) c) ->
+            && Clause.eval_to_false
+                 (Trail.assign trail) (Clause.remove (Term.not_ lit) c) ->
           (* reached UIP *)
           let tr = unwind_till_next_decision trail in
           let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
@@ -825,7 +828,7 @@ module State = struct
     |> Iter.find_map
       (fun c ->
          (* non-false lits *)
-         let c' = clause_filter_false assign c in
+         let c' = Clause.filter_false assign c in
          match Clause.as_unit c' with
          | Some l when not (Term.Map.mem l assign) -> Some (c,l)
          | _ -> None)
@@ -905,7 +908,8 @@ module State = struct
     )
 
   let find_false_clause (self:t) : _ option =
-    match CCList.find_opt (Trail.eval_to_false self.trail) self.cs with
+    let ass = Trail.assign self.trail in
+    match CCList.find_opt (Clause.eval_to_false ass) self.cs with
     | None -> None
     | Some c ->
       (* conflict! *)
@@ -1002,7 +1006,7 @@ module State = struct
           let concl =
             (* one of the two terms is false in current trail *)
             if Term.is_bool t1 then (
-              match eval_lit ass t1, eval_lit ass t2 with
+              match Clause.eval_lit ass t1, Clause.eval_lit ass t2 with
               | Some true, Some false ->
                 [Term.not_ t1; t2]
               | Some false, Some true ->
@@ -1027,7 +1031,10 @@ module State = struct
       let lemma = mk_uf_lemma self cuf in
       let expl = Fmt.asprintf "add UF lemma %a" Clause.pp lemma in
       (* lemma must be false *)
-      assert (Clause.is_empty @@ clause_filter_false (Trail.assign self.trail) lemma);
+      let reduced = Clause.filter_false (Trail.assign self.trail) lemma in
+      if not @@ Clause.is_empty reduced then (
+        Util.errorf "bad lemma: %a@ reduced: %a" Clause.pp lemma Clause.pp reduced;
+      );
       Some (ATS.One (make self.env self.cs self.trail (Conflict_bool lemma), expl))
 
   let if_searching f self = match self.status with
@@ -1039,8 +1046,6 @@ module State = struct
     | Sat | Unsat -> Some (ATS.Done (self, "done"))
     | _ -> None
 
-  (* TODO: congruence conflict + congruence lemma *)
-
   let rules : _ ATS.rule list list = [
     [is_done];
     [resolve_bool_conflict_; solve_uf_domain_conflict; backjump_];
@@ -1048,7 +1053,8 @@ module State = struct
      if_searching find_uf_domain_conflict;
      if_searching find_congruence_conflict;
     ];
-    [if_searching propagate; if_searching propagate_uf_eq];
+    [if_searching propagate];
+    [if_searching propagate_uf_eq];
     [if_searching decide];
   ]
 end
