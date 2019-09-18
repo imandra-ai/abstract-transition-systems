@@ -460,7 +460,7 @@ module Clause = struct
 end
 
 module Trail = struct
-  type kind = Decision | BCP of Clause.t
+  type kind = Decision | BCP of Clause.t | Eval
   type t =
     | Nil
     | Cons of {
@@ -478,7 +478,7 @@ module Trail = struct
   let cons kind (lit:Term.t) (value:Value.t) (next:t) : t =
     let lit, value =
       if Term.sign lit then lit, value else Term.not_ lit, Value.not_ value in
-    Format.printf "trail.cons %a <- %a@." Term.pp lit Value.pp value;
+    (* Format.printf "trail.cons %a <- %a@." Term.pp lit Value.pp value; *)
     let _assign = lazy (
       let a = assign next in
       if Value.is_bool value then (
@@ -513,7 +513,7 @@ module Trail = struct
   let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,t,v) -> t,v)
 
   let pp_trail_elt out (k,lit,v) =
-    let cause = match k with Decision -> "*" | BCP _ -> "" in
+    let cause = match k with Decision -> "*" | BCP _ -> "" | Eval -> "$" in
     Fmt.fprintf out "(@[%a%s@ <- %a@])" Term.pp lit cause Value.pp v
 
   let pp out (self:t) : unit =
@@ -525,16 +525,26 @@ module State = struct
     | Sat
     | Unsat
     | Conflict_bool of Clause.t
-    | Conflict_uf_forbid of Term.t * Value.t
-    | Conflict_uf_forced2 of Term.t * Value.t * Value.t
-    | Conflict_uf_eval_eq of Term.t
+    | Conflict_uf_forbid of {
+        t: Term.t;
+        v: Value.t;
+        lit_force: Term.t;
+        lit_forbid: Term.t;
+      }
+    | Conflict_uf_forced2 of {
+        t: Term.t;
+        v1: Value.t;
+        v2: Value.t;
+        lit_v1: Term.t;
+        lit_v2: Term.t;
+      }
     | Backjump of Clause.t
     | Searching
   type uf_domain =
-    | UFD_forced of Value.t
-    | UFD_forbid of Value.t list
-    | UFD_conflict_forbid of Value.t
-    | UFD_conflict_forced2 of Value.t * Value.t
+    | UFD_forced of Value.t * Term.t
+    | UFD_forbid of (Value.t * Term.t) list
+    | UFD_conflict_forbid of Value.t * Term.t * Term.t
+    | UFD_conflict_forced2 of Value.t * Term.t  * Value.t * Term.t 
   type t = {
     env: Env.t;
     cs: Clause.t list;
@@ -558,40 +568,43 @@ module State = struct
     let ass = Trail.assign trail in
     let is_ass x = Term.Map.mem x ass in
     (* pairs of impossible assignments *)
-    let pairs : (Term.t * _) list =
+    let pairs : (Term.t * Term.t * _) list =
       Trail.iter_ass trail
       |> Iter.filter_map
         (fun (t,v) -> match Term.view t, v with
            | Term.Eq (a,b), Value.Bool bool when is_ass a && not (is_ass b) ->
              let value = Term.Map.find a ass in
-             Some (b, if bool then `Forced value else `Forbid value)
+             Some (t, b, if bool then `Forced value else `Forbid value)
            | Term.Eq (a,b), Value.Bool bool when is_ass b && not (is_ass a) ->
              let value = Term.Map.find b ass in
-             Some (a, if bool then `Forced value else `Forbid value)
+             Some (t, a, if bool then `Forced value else `Forbid value)
            | _ -> None)
       |> Iter.to_rev_list
     in
     List.fold_left
-      (fun m (t,op) ->
+      (fun m (t1,t,op) ->
          match op, Term.Map.get t m with
          | _, Some (UFD_conflict_forbid _ | UFD_conflict_forced2 _) -> m
-         | `Forced v, Some (UFD_forced v') ->
-           if Value.equal v v' then m
-           else Term.Map.add t (UFD_conflict_forced2 (v,v')) m
-         | `Forced v, Some (UFD_forbid l) ->
-           if List.exists (Value.equal v) l
-           then Term.Map.add t (UFD_conflict_forbid v) m
-           else Term.Map.add t (UFD_forced v) m
-         | `Forbid v, Some (UFD_forced v') ->
-           if Value.equal v v'
-           then Term.Map.add t (UFD_conflict_forbid v) m
+         | `Forced v1, Some (UFD_forced (v2,t2)) ->
+           if Value.equal v1 v2 then m
+           else Term.Map.add t (UFD_conflict_forced2 (v1,t1,v2,t2)) m
+         | `Forced v1, Some (UFD_forbid l) ->
+           begin match CCList.find_opt (fun (v2,_) -> Value.equal v1 v2) l with
+             | Some (_,t2) ->
+               Term.Map.add t (UFD_conflict_forbid (v1,t1,t2)) m
+             | None ->
+               Term.Map.add t (UFD_forced (v1,t1)) m
+           end
+         | `Forbid v1, Some (UFD_forced (v2,t2)) ->
+           if Value.equal v1 v2
+           then Term.Map.add t (UFD_conflict_forbid (v1,t2,t1)) m
            else m
-         | `Forbid v, Some (UFD_forbid l) ->
-           Term.Map.add t (UFD_forbid (v::l)) m
-         | `Forced v, None ->
-           Term.Map.add t (UFD_forced v) m
-         | `Forbid v, None ->
-           Term.Map.add t (UFD_forbid [v]) m)
+         | `Forbid v1, Some (UFD_forbid l) ->
+           Term.Map.add t (UFD_forbid ((v1,t1)::l)) m
+         | `Forced v1, None ->
+           Term.Map.add t (UFD_forced (v1,t1)) m
+         | `Forbid v1, None ->
+           Term.Map.add t (UFD_forbid [v1,t1]) m)
       Term.Map.empty pairs
 
   (* compute signatures, by looking at terms [f t1…tn <- v] where each [t_i]
@@ -632,13 +645,13 @@ module State = struct
     | Unsat -> Fmt.string out "unsat"
     | Searching -> Fmt.string out "searching"
     | Conflict_bool c -> Fmt.fprintf out "(@[conflict %a@])" Clause.pp c
-    | Conflict_uf_forbid (t,v) ->
-      Fmt.fprintf out "(@[conflict-uf-forbid@ @[%a <-@ %a@]@])" Term.pp t Value.pp v
-    | Conflict_uf_forced2 (t,v1,v2) ->
-      Fmt.fprintf out "(@[conflict-uf-forced2@ @[%a <-@ %a@ or %a@]@])"
-        Term.pp t Value.pp v1 Value.pp v2
-    | Conflict_uf_eval_eq t ->
-      Fmt.fprintf out "(@[conflict-uf-eval-eq@ %a@])" Term.pp t
+    | Conflict_uf_forbid {t;v;lit_force;lit_forbid} ->
+      Fmt.fprintf out "(@[conflict-uf-forbid@ @[%a <-@ %a@]@ :force %a@ :forbid %a@])"
+        Term.pp t Value.pp v Term.pp lit_force Term.pp lit_forbid
+    | Conflict_uf_forced2 {t;v1;v2;lit_v1;lit_v2} ->
+      Fmt.fprintf out
+        "(@[conflict-uf-forced2@ %a @[<- %a@ :by %a@]@ :or @[<- %a@ :by %assert@]@])"
+        Term.pp t Value.pp v1 Term.pp lit_v1 Value.pp v2 Term.pp lit_v2
     | Backjump c -> Fmt.fprintf out "(@[backjump %a@])" Clause.pp c
 
   let pp out (self:t) : unit =
@@ -699,7 +712,7 @@ module State = struct
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
         | Trail.Cons {kind=BCP _; next; _} ->
           Some (One (make self.env self.cs next self.status, "consume"))
-        | Trail.Cons {kind=Decision; _} ->
+        | Trail.Cons {kind=Decision | Eval; _} ->
           (* start backjumping *)
           Some (One (make self.env self.cs self.trail (Backjump c), "backjump below conflict level"))
       end
@@ -727,7 +740,7 @@ module State = struct
       and unwind_till_next_decision = function
         | Trail.Nil -> Trail.empty
         | Trail.Cons {kind=Decision; next; _} -> next
-        | Trail.Cons {kind=BCP _;next; _} -> unwind_till_next_decision next
+        | Trail.Cons {kind=BCP _ | Eval;next; _} -> unwind_till_next_decision next
       in
       unwind_trail self.trail
     | _ -> None
@@ -756,6 +769,25 @@ module State = struct
       let trail = Trail.cons (BCP c) lit Value.true_ self.trail in
       Some (ATS.One (make self.env self.cs trail Searching, expl))
     | None -> None
+
+  (* find [a=b] where [a] and [b] are assigned *)
+  let propagate_uf_eq self : (_*_) ATS.step option =
+    let ass = Trail.assign self.trail in
+    let has_ass t = Term.Map.mem t ass in
+    all_vars self
+    |> Term.Set.to_seq
+    |> Iter.filter (fun t -> not @@ has_ass t)
+    |> Iter.find_map
+      (fun t ->
+        match Term.view t with
+          | Term.Eq (a,b) when has_ass a && has_ass b ->
+            let value =
+              Value.bool (Value.equal (Term.Map.find a ass) (Term.Map.find b ass))
+            in
+            let trail = Trail.cons Trail.Eval t value self.trail in
+            let expl = Fmt.asprintf "eval %a" Term.pp t in
+            Some (ATS.One (make self.env self.cs trail Searching, expl))
+          | _ -> None)
 
   let is_searching self = match self.status with
     | Searching -> true
@@ -786,13 +818,13 @@ module State = struct
                | None -> [mk_ x @@ Value.unin (Term.ty x) 0]
                | Some (UFD_conflict_forbid _ | UFD_conflict_forced2 _) ->
                  assert false
-               | Some (UFD_forced v) -> [mk_ x v]
+               | Some (UFD_forced (v,_)) -> [mk_ x v]
                | Some (UFD_forbid l) ->
                  let value =
                    Iter.(0--max_int)
                    |> Iter.find_map (fun i ->
                        let value = Value.unin (Term.ty x) i in
-                       if List.for_all (fun v' -> not (Value.equal value v')) l
+                       if List.for_all (fun (v',_) -> not (Value.equal value v')) l
                        then Some value else None)
                    |> CCOpt.get_exn
                  in
@@ -811,37 +843,6 @@ module State = struct
       (* conflict! *)
       Some (ATS.One (make self.env self.cs self.trail (Conflict_bool c), "false clause"))
 
-  let find_uf_eval_conflict (self:t) : _ option =
-    let ass = Trail.assign self.trail in
-    let l =
-      Trail.iter_ass self.trail
-      |> Iter.filter_map
-        (fun (t,v) -> match Term.view t, v with
-           | Term.Eq (a,b), Value.Bool bool ->
-             (* is [a=b <- bool] inconsistent with [a] and [b]'s values? *)
-             begin match Term.Map.get a ass, Term.Map.get b ass with
-               | Some va, Some vb when Value.equal va vb && not bool ->
-                 Some (t, Conflict_uf_eval_eq t)
-               | Some va, Some vb when not (Value.equal va vb) && bool ->
-                 Some (t, Conflict_uf_eval_eq t)
-               | _ -> None
-             end
-           | _ -> None)
-      |> Iter.to_rev_list
-    in
-    let mk_expl t = Fmt.asprintf "UF eval conflict on %a" Term.pp t in
-    begin match l with
-      | [] -> None
-      | [t,c] ->
-        Some (ATS.One (make self.env self.cs self.trail c, mk_expl t))
-      | cs ->
-        let choices =
-          List.map
-            (fun (t,c) -> make self.env self.cs self.trail c, mk_expl t) cs
-        in
-        Some (ATS.Choice choices)
-    end
-
   let find_uf_domain_conflict (self:t) : _ option =
     let domain = uf_domain self in
     let l =
@@ -849,10 +850,10 @@ module State = struct
       |> Iter.filter_map
           (fun (t,dom) ->
             match dom with
-            | UFD_conflict_forbid v ->
-              Some (t, Conflict_uf_forbid (t,v))
-            | UFD_conflict_forced2 (v1,v2) ->
-              Some (t, Conflict_uf_forced2 (t,v1,v2))
+            | UFD_conflict_forbid (v,t1,t2) ->
+              Some (t, Conflict_uf_forbid {t;v;lit_force=t1; lit_forbid=t2})
+            | UFD_conflict_forced2 (v1,t1,v2,t2) ->
+              Some (t, Conflict_uf_forced2 {t;v1;lit_v1=t1;v2;lit_v2=t2})
             | _ -> None)
       |> Iter.to_rev_list
     in
@@ -869,7 +870,34 @@ module State = struct
         Some (ATS.Choice choices)
     end
 
-  (* TODO: UF conflict resolution (producing a lemma) *)
+  (* assuming [eq] is an equation [t=u] or [u=t], return [u] *)
+  let get_eq_other_side (t:Term.t) ~(eq:Term.t) : Term.t =
+    match Term.view eq with
+    | Term.Eq (a,b) when Term.equal a t -> b
+    | Term.Eq (a,b) when Term.equal b t -> a
+    | _ -> Util.errorf "get_eq_other_side of %a in %a" Term.pp t Term.pp eq
+
+  let solve_uf_domain_conflict (self:t) : _ option =
+    match self.status with
+    | Searching | Sat | Unsat | Backjump _ | Conflict_bool _ -> None
+    | Conflict_uf_forbid { t; v=_; lit_force; lit_forbid } ->
+      (* learn transitivity lemma *)
+      let lemma =
+        let t1 = get_eq_other_side t ~eq:lit_forbid in
+        let t2 = get_eq_other_side t ~eq:lit_force in
+        Clause.of_list [Term.neq t1 t; Term.neq t2 t; Term.eq t1 t2]
+      in
+      let expl = Fmt.asprintf "add UF lemma %a" Clause.pp lemma in
+      Some (ATS.One (make self.env self.cs self.trail (Conflict_bool lemma), expl))
+    | Conflict_uf_forced2 { t; v1=_; v2=_; lit_v1; lit_v2 } ->
+      (* transitivity lemma *)
+      let lemma =
+        let t1 = get_eq_other_side t ~eq:lit_v1 in
+        let t2 = get_eq_other_side t ~eq:lit_v2 in
+        Clause.of_list [Term.neq t1 t; Term.neq t2 t; Term.eq t1 t2]
+      in
+      let expl = Fmt.asprintf "add UF lemma %a" Clause.pp lemma in
+      Some (ATS.One (make self.env self.cs self.trail (Conflict_bool lemma), expl))
 
   let if_searching f self =
     if is_searching self then f self else None
@@ -881,11 +909,10 @@ module State = struct
 
   let rules : _ ATS.rule list list = [
     [is_done];
-    [resolve_bool_conflict_; backjump_];
+    [resolve_bool_conflict_; solve_uf_domain_conflict; backjump_];
     [if_searching find_false_clause;
-     if_searching find_uf_domain_conflict;
-     if_searching find_uf_eval_conflict];
-    [if_searching propagate];
+     if_searching find_uf_domain_conflict; ];
+    [if_searching propagate; if_searching propagate_uf_eq];
     [if_searching decide];
   ]
 end

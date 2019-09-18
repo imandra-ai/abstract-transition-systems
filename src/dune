@@ -1,5 +1,5 @@
 (library
  (name ats)
  (public_name ats)
- (flags :standard -warn-error -7-32-33)
+ (flags :standard -warn-error -7-27-32-33)
  (libraries containers iter))
