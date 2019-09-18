@@ -36,7 +36,7 @@ module Make_cmd(A: ATS.S) = struct
     (try_ (P.char '"') *> P.chars_if (fun c -> c <> '"') <* char '"')
 
   (* command parser *)
-  let parse : t P.t =
+  let parse1 : t P.t =
     let open P in
     let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
     skip_white *> parsing "command" (
@@ -53,6 +53,15 @@ module Make_cmd(A: ATS.S) = struct
       <|> P.fail "invalid command"
     ) <* skip_white
 
+  (* command parser *)
+  let parse : t list P.t =
+    let open P in
+    P.fix (fun self ->
+      parse1 >>= fun t ->
+      skip_white *> (
+        ((try_ (char ';') *> skip_white *> self >|= fun tl -> t :: tl) <|>
+         return [t])))
+
   let hints (s:string) : _ option =
     match List.assoc (String.trim s) all_ with
     | h -> Some (h, LNoise.Blue, false)
@@ -64,27 +73,25 @@ module Make_cmd(A: ATS.S) = struct
       (fun (cmd,_) ->
          if CCString.prefix ~pre:s cmd then Some cmd else None)
       all_
+
+  let pp out = function
+    | Quit -> Fmt.string out "quit"
+    | Show -> Fmt.string out "show"
+    | Auto i -> Fmt.fprintf out "auto %d" i
+    | Next i -> Fmt.fprintf out "next %d" i
+    | Help None -> Fmt.string out "help"
+    | Help (Some s) -> Fmt.fprintf out "help %s" s
+    | Pick i -> Fmt.fprintf out "pick %d" i
+    | Init st -> Fmt.fprintf out "(@[<2>init@ %a@])" A.State.pp st
+    | Load file -> Fmt.fprintf out "load %S" file
 end
 
-(* multi-line input if there are more "(" than ")" so far *)
 let lnoise_input prompt : string option =
-  let buf = Buffer.create 32 in
-  let depth = ref 0 in (* balance "(" and ")" *)
-  let first = ref true in
-  let rec loop () =
-    let p = if !first then prompt else String.make (String.length prompt) ' ' in
-    first := false;
-    match LNoise.linenoise p with
-    | None when Buffer.length buf=0 -> None
-    | None -> Some (Buffer.contents buf)
-    | Some s ->
-      String.iter (function '(' -> incr depth | ')' -> decr depth | _ -> ()) s;
-      Buffer.add_string buf s;
-      if !depth <= 0 then Some (Buffer.contents buf) else loop()
-  in
-  loop()
+  LNoise.linenoise prompt
 
-let repl ?(ats=default_ats) () =
+(* launch [repl]
+   @param cmds optional commands to run initially *)
+let repl ?(ats=default_ats) ?(cmds=[]) () =
   let (module A) = ats in
   let module Cmd = Make_cmd(A) in
   let module R = Run.Make(A) in
@@ -92,7 +99,7 @@ let repl ?(ats=default_ats) () =
   let cur_st_ = ref A.State.empty in
   let choices_ : (A.State.t * string) list option ref = ref None in
   let done_ = ref false in
-  LNoise.set_multiline false;
+  LNoise.set_multiline true;
   (* completion of commands *)
   LNoise.set_completion_callback
     (fun s compl ->
@@ -145,16 +152,19 @@ let repl ?(ats=default_ats) () =
       | Error msg ->
         Fmt.printf "@{<Red>error@}: invalid command: %s@." msg;
         loop()
-      | Ok Cmd.Quit -> () (* exit *)
-      | Ok cmd ->
+      | Ok l ->
+        Format.printf "cmds: [@[%a@]]@." (Util.pp_list ~sep:"; " Cmd.pp) l;
         LNoise.history_add s |> ignore; (* save cmd *)
-        begin
-          try
-            process_cmd cmd;
-          with Util.Error msg ->
-            Fmt.printf "@{<Red>error@}: %s@." msg;
-        end;
-        loop();
+        process_cmds l
+  and process_cmds = function
+    | [] -> loop()
+    | Cmd.Quit :: _ -> () (* exit *)
+    | cmd :: l ->
+      begin match process_cmd cmd with
+        | () -> process_cmds l
+        | exception Util.Error msg ->
+          Fmt.printf "@{<Red>error@}: %s@." msg;
+      end;
   and process_cmd = function
     | Cmd.Quit -> assert false
     | Cmd.Help None ->
@@ -215,11 +225,24 @@ let repl ?(ats=default_ats) () =
             i (List.length l)
       end
   in
-  loop ()
+  begin match cmds with
+    | [] -> loop()
+    | l ->
+      (* parse initial commands *)
+      let l =
+        CCList.flat_map
+          (fun s -> match P.parse_string Cmd.parse s with
+             | Ok l -> l
+             | Error msg -> Util.errorf "invalid command: %s" msg)
+          l
+      in
+      process_cmds l
+  end
 
 let () =
   let ats_ = ref default_ats in
   let color_ = ref true in
+  let cmds_ = ref [] in
   let find_ats_ s =
     match List.find (fun a -> ATS.name a = s) ats_l with
     | a -> ats_ := a
@@ -229,6 +252,7 @@ let () =
     ("-s", Arg.Symbol (List.map ATS.name ats_l, find_ats_),
      Printf.sprintf " choose transition system (default %s)" (ATS.name default_ats));
     ("-nc", Arg.Clear color_, " disable colors");
+    ("-e", Arg.String (CCList.Ref.push cmds_), " execute given commands");
   ] |> Arg.align
   in
   Arg.parse opts (fun _ -> ()) "usage: ats [option*]";
@@ -236,6 +260,6 @@ let () =
   Printf.printf "picked ats %s\n%!" (ATS.name !ats_);
   LNoise.history_load ~filename:".ats-history" |> ignore;
   LNoise.history_set ~max_length:1000 |> ignore;
-  repl ~ats:!ats_ ();
+  repl ~ats:!ats_ ~cmds:(List.rev !cmds_) ();
   LNoise.history_save ~filename:".ats-history" |> ignore;
   ()

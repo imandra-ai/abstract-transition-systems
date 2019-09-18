@@ -682,7 +682,7 @@ module State = struct
 
   (* ######### *)
 
-  let resolve_conflict_ (self:t) : _ ATS.step option =
+  let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
     | Conflict_bool c when Clause.is_empty c ->
@@ -869,6 +869,8 @@ module State = struct
         Some (ATS.Choice choices)
     end
 
+  (* TODO: UF conflict resolution (producing a lemma) *)
+
   let if_searching f self =
     if is_searching self then f self else None
 
@@ -879,7 +881,7 @@ module State = struct
 
   let rules : _ ATS.rule list list = [
     [is_done];
-    [resolve_conflict_; backjump_];
+    [resolve_bool_conflict_; backjump_];
     [if_searching find_false_clause;
      if_searching find_uf_domain_conflict;
      if_searching find_uf_eval_conflict];
