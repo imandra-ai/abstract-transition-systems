@@ -436,7 +436,9 @@ module Clause = struct
     then Term.pp out (Term.Set.choose c)
     else Fmt.fprintf out "(@[or@ %a@])" (pp_list Term.pp) (Term.Set.to_list c)
   let is_empty = Term.Set.is_empty
+  let choose = Term.Set.choose
   let contains l c = Term.Set.mem l c
+  let length = Term.Set.cardinal
   let remove l c : t = Term.Set.remove l c
   let union = Term.Set.union
   let lits c = Term.Set.to_seq c
@@ -461,6 +463,7 @@ end
 
 module Trail = struct
   type kind = Decision | BCP of Clause.t | Eval
+  type assignment = Value.t Term.Map.t
   type t =
     | Nil
     | Cons of {
@@ -468,7 +471,7 @@ module Trail = struct
         lit: Term.t;
         value: Value.t;
         next: t;
-        _assign: Value.t Term.Map.t lazy_t; (* assignment, from trail *)
+        _assign: assignment lazy_t; (* assignment, from trail *)
       }
 
   let[@inline] assign = function
@@ -695,6 +698,25 @@ module State = struct
 
   (* ######### *)
 
+  (* semantic evaluation *)
+  let eval_lit (ass:Trail.assignment) (t:Term.t) : bool option =
+    match Term.view t with
+    | Term.Eq (a,b) ->
+      begin match Term.Map.get a ass, Term.Map.get b ass with
+        | Some va, Some vb -> Some (Value.equal va vb)
+        | _ -> None
+      end
+    | _ -> None
+
+  (* remove all literals that somehow evaluate to false *)
+  let clause_filter_false (assign:Trail.assignment) (c:Clause.t) : Clause.t =
+    Clause.filter
+      (fun l ->
+         match Term.Map.get l assign, eval_lit assign l with
+         | Some (Value.Bool false), _ | _, Some false -> false
+         | _ -> true)
+      c
+
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
@@ -712,7 +734,9 @@ module State = struct
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
         | Trail.Cons {kind=BCP _; next; _} ->
           Some (One (make self.env self.cs next self.status, "consume"))
-        | Trail.Cons {kind=Decision | Eval; _} ->
+        | Trail.Cons {kind=Eval; lit; next; _} ->
+          Some (One (make self.env self.cs next self.status, Fmt.sprintf "consume-eval %a" Term.pp lit))
+        | Trail.Cons {kind=Decision; _} ->
           (* start backjumping *)
           Some (One (make self.env self.cs self.trail (Backjump c), "backjump below conflict level"))
       end
@@ -728,6 +752,33 @@ module State = struct
         match trail with
         | Trail.Nil -> 
           Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
+        | Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
+          assert (kind=Decision);
+          let c_reduced = clause_filter_false (Trail.assign next) c in
+          if Clause.is_empty c_reduced then (
+            (* TODO: it might be more subtle, this should only happen
+               at level 0 *)
+            let expl = Fmt.sprintf "backjump with %a with empty reduct" Clause.pp c in
+            Some (One (make self.env (c::self.cs) next Unsat, expl))
+          ) else if Clause.length c_reduced=1 then (
+            (* normal backjump *)
+            let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
+            Some (One (make self.env (c::self.cs) next Searching, expl))
+          ) else if Clause.length c_reduced=2 then (
+            (* semantic case split? *)
+            let decision = Clause.choose c_reduced in
+            let expl =
+              Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
+                Clause.pp c Term.pp decision Clause.pp c_reduced
+            in
+            let trail = Trail.cons Trail.Decision decision Value.true_ next in
+            Some (One (make self.env (c :: self.cs) trail Searching, expl))
+          ) else (
+            Util.errorf
+              "backjump with clause %a@ but filter-false %a@ \
+               should have at most 2 lits"
+              Clause.pp c Clause.pp c_reduced
+          )
         | Trail.Cons {lit; _}
           when Clause.contains (Term.not_ lit) c
             && Trail.eval_to_false trail (Clause.remove (Term.not_ lit) c) ->
@@ -751,13 +802,7 @@ module State = struct
     |> Iter.find_map
       (fun c ->
          (* non-false lits *)
-         let c' =
-           Clause.filter
-             (fun l -> match Term.Map.get l assign with
-                | Some (Value.Bool false) -> false
-                | _ -> true)
-             c
-         in
+         let c' = clause_filter_false assign c in
          match Clause.as_unit c' with
          | Some l when not (Term.Map.mem l assign) -> Some (c,l)
          | _ -> None)
@@ -877,6 +922,7 @@ module State = struct
     | Term.Eq (a,b) when Term.equal b t -> a
     | _ -> Util.errorf "get_eq_other_side of %a in %a" Term.pp t Term.pp eq
 
+  (* learn some UF lemma and then do resolution on it *)
   let solve_uf_domain_conflict (self:t) : _ option =
     match self.status with
     | Searching | Sat | Unsat | Backjump _ | Conflict_bool _ -> None
@@ -885,9 +931,11 @@ module State = struct
       let lemma =
         let t1 = get_eq_other_side t ~eq:lit_forbid in
         let t2 = get_eq_other_side t ~eq:lit_force in
-        Clause.of_list [Term.neq t1 t; Term.neq t2 t; Term.eq t1 t2]
+        Clause.of_list [Term.eq t1 t; Term.neq t2 t; Term.neq t1 t2]
       in
       let expl = Fmt.asprintf "add UF lemma %a" Clause.pp lemma in
+      (* lemma must be false *)
+      assert (Clause.is_empty @@ clause_filter_false (Trail.assign self.trail) lemma);
       Some (ATS.One (make self.env self.cs self.trail (Conflict_bool lemma), expl))
     | Conflict_uf_forced2 { t; v1=_; v2=_; lit_v1; lit_v2 } ->
       (* transitivity lemma *)
@@ -897,15 +945,20 @@ module State = struct
         Clause.of_list [Term.neq t1 t; Term.neq t2 t; Term.eq t1 t2]
       in
       let expl = Fmt.asprintf "add UF lemma %a" Clause.pp lemma in
+      (* lemma must be false *)
+      assert (Clause.is_empty @@ clause_filter_false (Trail.assign self.trail) lemma);
       Some (ATS.One (make self.env self.cs self.trail (Conflict_bool lemma), expl))
 
-  let if_searching f self =
-    if is_searching self then f self else None
+  let if_searching f self = match self.status with
+    | Searching -> f self
+    | _ -> None
 
   let is_done (self:t) =
     match self.status with
     | Sat | Unsat -> Some (ATS.Done (self, "done"))
     | _ -> None
+
+  (* TODO: congruence conflict + congruence lemma *)
 
   let rules : _ ATS.rule list list = [
     [is_done];
