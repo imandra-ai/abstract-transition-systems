@@ -185,14 +185,14 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
     | Cmd.Show ->
       Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
       CCOpt.iter pp_choices !choices_;
+    | (Cmd.Next _ | Cmd.Auto _) when !done_ ->
+      Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Auto n ->
       let trace, choices = R.run (R.Tactic.Auto n) !cur_st_ in
       pp_trace trace;
       cur_st_ := trace.R.Trace.final;
       done_ := R.Trace.is_done trace;
       choices_ := choices;
-    | Cmd.Next _ when !done_ ->
-      Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Next n when n <= 0 ->
       Fmt.printf "@{<Red>error@}: need positive integer, not %d@." n;
     | Cmd.Next n ->
