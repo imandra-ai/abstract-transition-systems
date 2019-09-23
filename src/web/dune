@@ -1,0 +1,14 @@
+(executable
+ (name ats_web)
+ (modes js)
+ ;(modes byte)
+ ;(js_of_ocaml (javascript_files +gen_js_api/ojs_runtime.js))
+ (js_of_ocaml
+  (flags +gen_js_api/ojs_runtime.js))
+ (flags :standard -warn-error -27-32-33 -no-check-prims)
+ (libraries containers ats ocaml-vdom gen_js_api))
+
+(install
+ (section bin)
+ (package ats-web)
+ (files ./ats_web.bc.js ats_web.html))

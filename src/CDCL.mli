@@ -19,12 +19,33 @@ module Clause : sig
   val parse : t P.t
 end
 
+module Trail : sig
+  type kind = Decision | Prop of Clause.t
+  type trail_elt = kind * Lit.t
+  type t
+
+  val pp_trail_elt : trail_elt Fmt.printer
+  val to_iter : t -> trail_elt Iter.t
+  val length : t -> int
+end
+
+
 module State : sig
+  type status =
+    | Sat
+    | Unsat
+    | Conflict of Clause.t
+    | Backjump of Clause.t
+    | Searching
+
   type t
 
   val empty : t
   val pp : t Fmt.printer
   val parse : t P.t
+  val pp_status : status Fmt.printer
+
+  val view : t -> status * Trail.t * Clause.t list
 end
 
 module A : ATS.BASIC with module State = State
