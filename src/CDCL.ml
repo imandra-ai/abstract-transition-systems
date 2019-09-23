@@ -38,6 +38,7 @@ end
 
 module Trail = struct
   type kind = Decision | Prop of Clause.t
+  type trail_elt = kind * Lit.t
   type t =
     | Nil
     | Cons of {
@@ -68,6 +69,7 @@ module Trail = struct
     | Cons {kind;lit;next;_} -> k (kind,lit); iter k next
 
   let to_iter (tr:t) = fun k -> iter k tr
+  let length t = to_iter t |> Iter.length
 
   let pp_trail_elt out (k,lit) = match k with
     | Decision -> Fmt.fprintf out "%a*" Lit.pp lit
@@ -91,6 +93,8 @@ module State = struct
     _all_vars: Lit.Set.t lazy_t;
     _to_decide: Lit.Set.t lazy_t;
   }
+
+  let view st = st.status, st.trail, st.cs
 
   (* main constructor *)
   let make (cs:Clause.t list) (trail:Trail.t) status : t =

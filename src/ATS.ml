@@ -29,14 +29,14 @@ end
 
 (** An abstract transition system implementation *)
 module type S = sig
-  module B : BASIC
-  include module type of B
+  include BASIC
 
   val next : State.t -> (State.t * string) step
 end
 
-module Make(B : BASIC) : S with module B = B = struct
-  module B = B
+module Make(B : BASIC)
+  : S with module State = B.State
+= struct
   include B
 
   let merge_ s1 s2 =
