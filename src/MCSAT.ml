@@ -506,6 +506,7 @@ module Trail = struct
         lit: Term.t;
         value: Value.t;
         next: t;
+        _level: int lazy_t;
         _assign: assignment lazy_t; (* assignment, from trail *)
       }
 
@@ -513,11 +514,20 @@ module Trail = struct
     | Nil -> Term.Map.empty
     | Cons {_assign=lazy a;_} -> a
 
+  let[@inline] level = function
+    | Nil -> 0
+    | Cons {_level=lazy l;_} -> l
+
   let cons kind (lit:Term.t) (value:Value.t) (next:t) : t =
     let lit, value =
       if Term.sign lit then lit, value else Term.not_ lit, Value.not_ value in
     (* Format.printf "trail.cons %a <- %a@." Term.pp lit Value.pp value; *)
-    let _assign = lazy (
+    let _level = lazy (
+      match kind with
+      | Decision -> 1 + level next
+      | BCP _ | Eval -> level next
+    ) 
+    and _assign = lazy (
       let a = assign next in
       if Value.is_bool value then (
         a |> Term.Map.add lit value
@@ -526,7 +536,7 @@ module Trail = struct
         a |> Term.Map.add lit value
       )
     ) in
-    Cons { kind; lit; value; next; _assign; }
+    Cons { kind; lit; value; next; _assign; _level; }
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty = cons (BCP unit_true) Term.true_ Value.true_ Nil
@@ -769,57 +779,55 @@ module State = struct
 
   let backjump_ (self:t) : _ ATS.step option =
     let open ATS in
-    match self.status with
-    | Backjump c when Clause.is_empty c ->
+    let rec unwind_till_next_decision = function
+      | Trail.Nil -> Trail.empty
+      | Trail.Cons {kind=Decision; next; _} -> next
+      | Trail.Cons {kind=BCP _ | Eval;next; _} -> unwind_till_next_decision next
+    in
+    let trail = self.trail in
+    match self.status, trail with
+    | Backjump c, _ when Clause.is_empty c ->
       Some (One (make self.env self.cs self.trail Unsat, "learnt false"))
-    | Backjump c ->
-      let rec unwind_trail trail =
-        match trail with
-        | Trail.Nil -> 
-          Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
-        | Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
-          assert (kind=Decision);
-          let c_reduced = Clause.filter_false (Trail.assign next) c in
-          if Clause.is_empty c_reduced then (
-            (* TODO: it might be more subtle, this should only happen
-               at level 0 *)
-            let expl = Fmt.sprintf "backjump with %a with empty reduct" Clause.pp c in
-            Some (One (make self.env (c::self.cs) next Unsat, expl))
-          ) else if Clause.length c_reduced=1 then (
-            (* normal backjump *)
-            let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-            Some (One (make self.env (c::self.cs) next Searching, expl))
-          ) else if Clause.length c_reduced=2 then (
-            (* semantic case split? *)
-            let decision = Clause.choose c_reduced in
-            let expl =
-              Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
-                Clause.pp c Term.pp decision Clause.pp c_reduced
-            in
-            let trail = Trail.cons Trail.Decision decision Value.true_ next in
-            Some (One (make self.env (c :: self.cs) trail Searching, expl))
-          ) else (
-            Util.errorf
-              "backjump with clause %a@ but filter-false %a@ \
-               should have at most 2 lits"
-              Clause.pp c Clause.pp c_reduced
-          )
-        | Trail.Cons {lit; _}
-          when Clause.contains (Term.not_ lit) c
-            && Clause.eval_to_false
-                 (Trail.assign trail) (Clause.remove (Term.not_ lit) c) ->
-          (* reached UIP *)
-          let tr = unwind_till_next_decision trail in
-          let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-          let trail = Trail.cons (BCP c) lit Value.false_ tr in
-          Some (One (make self.env (c :: self.cs) trail Searching, expl))
-        | Trail.Cons {next;_} -> unwind_trail next
-      and unwind_till_next_decision = function
-        | Trail.Nil -> Trail.empty
-        | Trail.Cons {kind=Decision; next; _} -> next
-        | Trail.Cons {kind=BCP _ | Eval;next; _} -> unwind_till_next_decision next
-      in
-      unwind_trail self.trail
+    | Backjump _, Trail.Nil ->
+      Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
+    | Backjump _, _ when Trail.level trail = 0 ->
+      Some (One (make self.env self.cs self.trail Unsat, "level 0 trail")) (* unsat! *)
+    | Backjump c, Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
+      assert (kind=Decision);
+      let c_reduced = Clause.filter_false (Trail.assign next) c in
+      if Clause.is_empty c_reduced then (
+        let expl = "T-consume" in
+        Some (One (make self.env self.cs next (Backjump c), expl))
+      ) else if Clause.length c_reduced=1 then (
+        (* normal backjump *)
+        let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
+        Some (One (make self.env (c::self.cs) next Searching, expl))
+      ) else if Clause.length c_reduced=2 then (
+        (* semantic case split? *)
+        let decision = Clause.choose c_reduced in
+        let expl =
+          Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
+            Clause.pp c Term.pp decision Clause.pp c_reduced
+        in
+        let trail = Trail.cons Trail.Decision decision Value.true_ next in
+        Some (One (make self.env (c :: self.cs) trail Searching, expl))
+      ) else (
+        Util.errorf
+          "backjump with clause %a@ but filter-false %a@ \
+           should have at most 2 lits"
+          Clause.pp c Clause.pp c_reduced
+      )
+    | Backjump c, Trail.Cons {lit; _}
+      when Clause.contains (Term.not_ lit) c
+        && Clause.eval_to_false
+             (Trail.assign trail) (Clause.remove (Term.not_ lit) c) ->
+      (* reached UIP *)
+      let tr = unwind_till_next_decision trail in
+      let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
+      let trail = Trail.cons (BCP c) lit Value.false_ tr in
+      Some (One (make self.env (c :: self.cs) trail Searching, expl))
+    | Backjump c, Trail.Cons {next;_} ->
+      Some (One (make self.env (c :: self.cs) next (Backjump c), "consume"))
     | _ -> None
 
   let find_unit_c (self:t) : (Clause.t * Term.t) option =

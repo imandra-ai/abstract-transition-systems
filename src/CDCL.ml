@@ -148,8 +148,6 @@ module State = struct
       end
     | _ -> None
 
-  (* TODO: instead of decision, use criterion about learnt clause becoming unit,
-     and then unwind to decision and propagate *)
   let backjump_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
