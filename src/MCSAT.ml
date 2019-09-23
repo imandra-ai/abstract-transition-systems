@@ -495,6 +495,8 @@ module Clause = struct
 
   let eval_to_false (ass:assignment) (c:t) : bool =
     for_all (fun t -> lit_eval_to_false ass t) c
+
+  module Set = CCSet.Make(struct type nonrec t = t let compare=compare end)
 end
 
 module Trail = struct
@@ -596,7 +598,7 @@ module State = struct
 
   type t = {
     env: Env.t;
-    cs: Clause.t list;
+    cs: Clause.Set.t;
     trail: Trail.t;
     status: status;
     _all_vars: Term.Set.t lazy_t;
@@ -671,10 +673,10 @@ module State = struct
     |> SigMap.of_seq
 
   (* main constructor *)
-  let make (env:Env.t) (cs:Clause.t list) (trail:Trail.t) status : t =
+  let make (env:Env.t) (cs:Clause.Set.t) (trail:Trail.t) status : t =
     let _all_vars = lazy (
       Iter.(
-        of_list cs
+        Clause.Set.to_seq cs
         |> flat_map Clause.lits |> flat_map Term.sub |> map Term.abs)
       |> Term.Set.of_seq;
     ) in
@@ -688,7 +690,7 @@ module State = struct
     let _uf_domain = lazy (compute_uf_domain trail) in
     { env; cs; trail; status; _all_vars; _to_decide; _uf_sigs; _uf_domain; }
 
-  let empty : t = make Env.empty [] Trail.empty Searching
+  let empty : t = make Env.empty Clause.Set.empty Trail.empty Searching
 
   let pp_conflict_uf out = function
     | CUF_forbid {t;v;lit_force;lit_forbid} ->
@@ -715,8 +717,8 @@ module State = struct
     Fmt.fprintf out
       "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs@ (@[<v>%a@])@]@ \
        @[<2>:trail@ %a@]@ @[<2>:env@ %a@]@])"
-      pp_status self.status (pp_list Clause.pp) self.cs Trail.pp self.trail
-      Env.pp self.env
+      pp_status self.status (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
+      Trail.pp self.trail Env.pp self.env
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
     let open P in
@@ -748,7 +750,7 @@ module State = struct
   let parse : t P.t =
     let open P in
     (skip_white *> char '(' *> parse_rec Env.empty [])
-    >|= fun (env,cs) -> make env cs Trail.empty Searching
+    >|= fun (env,cs) -> make env (Clause.Set.of_list cs) Trail.empty Searching
 
   (* ######### *)
 
@@ -801,7 +803,7 @@ module State = struct
       ) else if Clause.length c_reduced=1 then (
         (* normal backjump *)
         let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-        Some (One (make self.env (c::self.cs) next Searching, expl))
+        Some (One (make self.env (Clause.Set.add c self.cs) next Searching, expl))
       ) else if Clause.length c_reduced=2 then (
         (* semantic case split? *)
         let decision = Clause.choose c_reduced in
@@ -810,7 +812,7 @@ module State = struct
             Clause.pp c Term.pp decision Clause.pp c_reduced
         in
         let trail = Trail.cons Trail.Decision decision Value.true_ next in
-        Some (One (make self.env (c :: self.cs) trail Searching, expl))
+        Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
       ) else (
         Util.errorf
           "backjump with clause %a@ but filter-false %a@ \
@@ -825,14 +827,14 @@ module State = struct
       let tr = unwind_till_next_decision trail in
       let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
       let trail = Trail.cons (BCP c) lit Value.false_ tr in
-      Some (One (make self.env (c :: self.cs) trail Searching, expl))
+      Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
     | Backjump c, Trail.Cons {next;_} ->
-      Some (One (make self.env (c :: self.cs) next (Backjump c), "consume"))
+      Some (One (make self.env (Clause.Set.add c self.cs) next (Backjump c), "consume"))
     | _ -> None
 
   let find_unit_c (self:t) : (Clause.t * Term.t) option =
     let assign = Trail.assign self.trail in
-    Iter.of_list self.cs
+    Clause.Set.to_seq self.cs
     |> Iter.find_map
       (fun c ->
          (* non-false lits *)
@@ -917,7 +919,7 @@ module State = struct
 
   let find_false_clause (self:t) : _ option =
     let ass = Trail.assign self.trail in
-    match CCList.find_opt (Clause.eval_to_false ass) self.cs with
+    match Iter.find_pred (Clause.eval_to_false ass) (Clause.Set.to_seq self.cs) with
     | None -> None
     | Some c ->
       (* conflict! *)
