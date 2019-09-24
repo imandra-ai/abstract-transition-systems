@@ -7,6 +7,8 @@ module App = struct
     | M_load of string
     | M_parse
     | M_set_parse of string
+    | M_next
+    | M_step
 
   let h2 x = elt "h2" [text x]
   let pre x = elt "pre" [text x]
@@ -56,8 +58,9 @@ module App = struct
         ats: 'st ats;
         parents: 'st list; (* parent states *)
         st: 'st; (* current state *)
-        step: 'st Ats.ATS.step;
+        step: ('st * string) Ats.ATS.step;
     } -> logic_model
+      
   type model = {
     error: string option;
     parse: string;
@@ -69,17 +72,14 @@ module App = struct
     match s with
     | "cdcl" ->
       let st = CDCL.A.State.empty in
-      LM { ats=(module CDCL); st; parents=[]; step=Ats.ATS.Done st; }
+      LM { ats=(module CDCL); st; parents=[]; step=Ats.ATS.Done (st, ""); }
     | "mcsat" ->
       let st = CDCL.A.State.empty in
-      LM { ats=(module CDCL); st; parents=[]; step=Ats.ATS.Done st; }
+      LM { ats=(module CDCL); st; parents=[]; step=Ats.ATS.Done (st, ""); }
     | s -> failwith @@ "unknown system " ^ s
 
   let init : model =
-    let st = CDCL.A.State.empty in
-    { error=None;
-      parse="";
-      lm=LM { ats=(module CDCL); st; parents=[]; step=Ats.ATS.Done st; };
+    { error=None; parse=""; lm=init_ "cdcl";
     }
 
   let update (m:model) (msg:msg) =
@@ -89,19 +89,47 @@ module App = struct
     | M_parse, {parse; lm=LM ({ats=(module A); _} as a); _} ->
       begin match CCParse.parse_string A.A.State.parse parse with
         | Ok st ->
-          {m with lm=LM {a with st; }}
+          let step = A.A.next st in
+          {m with lm=LM {a with st; step; }}
         | Error msg ->
           {m with error=Some msg}
       end
+    | M_next, {lm=LM ({ats=(module A); st; step; _} as a); _} ->
+      begin match step with
+        | Ats.ATS.Done (st',_) ->
+          {m with lm=LM {a with st=st'; }} (* just go to [st'] *)
+        | Ats.ATS.Error msg ->
+          {m with error=Some msg}
+        | Ats.ATS.One (st',_) | Ats.ATS.Choice [st',_] ->
+          {m with lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
+        | Ats.ATS.Choice _ ->
+          {m with error=Some "need to make a choice"}
+      end
+    | M_step, {lm=LM ({ats=(module A); st; step; _} as a); _} ->
+      begin match step with
+        | Ats.ATS.Done (st',_) ->
+          {m with lm=LM {a with st=st'; }} (* just go to [st'] *)
+        | Ats.ATS.Error msg ->
+          {m with error=Some msg}
+        | Ats.ATS.One (st',_) | Ats.ATS.Choice ((st',_)::_) ->
+          (* make a choice *)
+          {m with lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
+        | Ats.ATS.Choice _ -> assert false
+      end
 
   let view (m:model) =
-    let {error; parse; lm=LM ({ats=(module A); _} as a)} = m in
+    let {error; parse; lm=LM ({ats=(module A); step; _} as a)} = m in
     let v_error = match error with
       | None -> []
       | Some s -> [div ~a:[style "color" "red"] [text s]]
     and v_load = [ 
       ul @@ List.map (fun s -> button ("load " ^ s) (M_load s)) all;
     ]
+    and v_actions = match step with
+      | Ats.ATS.One _ | Ats.ATS.Done _ | Ats.ATS.Error _ ->
+        [button "next" M_next; button "step" M_step]
+      | Ats.ATS.Choice _ ->
+        [button "step" M_step]
     and v_parse = [
       div [
         input [] ~a:[type_ "text"; value parse; oninput (fun s -> M_set_parse s)];
@@ -110,9 +138,16 @@ module App = struct
     ]
     in
     let v_lm = [
-      div [h2 A.A.name; A.view a.st];
+      div @@ List.flatten [
+        [h2 A.A.name];
+        (if a.parents=[] then []
+         else [
+               details ~short:(Printf.sprintf "previous (%d)" (List.length a.parents))
+               (div (List.rev_map A.view a.parents))]);
+        [A.view a.st]
+      ];
     ] in
-    div @@ List.flatten [v_error; v_load; v_parse; v_lm]
+    div @@ List.flatten [v_error; v_load; v_parse; v_actions; v_lm]
 
   let app = Vdom.simple_app ~init ~update ~view ()
 end
