@@ -1,3 +1,4 @@
 (executable
  (name examples)
+ (modes native)
  (libraries containers))

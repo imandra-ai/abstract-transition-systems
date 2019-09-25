@@ -41,6 +41,7 @@ end
 
 module type CALCULUS = sig
   module A : Ats.ATS.S
+  val name : string
   val view : A.State.t -> Calculus_msg.t Vdom.vdom
 end
 
@@ -50,11 +51,11 @@ module Make_calculus(C : CALCULUS)
   open C.A
   open Calculus_msg
 
-  let name = "cdcl"
+  let name = C.name
 
   type msg = Calculus_msg.t
   type model = {
-    parents: State.t list; (* parent states *)
+    parents: (State.t * string) list; (* parent states *)
     st: State.t; (* current state *)
     step: (State.t * string) Ats.ATS.step;
   }
@@ -74,23 +75,25 @@ module Make_calculus(C : CALCULUS)
   let view (m: model) : _ Vdom.vdom =
     let open Vdom in
     let v_actions_pre, v_actions_post = match m.step with
-      | Ats.ATS.One _ | Ats.ATS.Done _ | Ats.ATS.Error _ ->
+      | Ats.ATS.Done _ | Ats.ATS.Error _ ->
         [button "step" M_step; button "next" M_next], []
-      | Ats.ATS.Choice [_] -> [button "step" M_step], []
+      | Ats.ATS.One (_,expl) ->
+        [button "step" M_step; div [button "next" M_next; text_f "(by: %s)" expl]], []
       | Ats.ATS.Choice l ->
         let choices =
           List.mapi
             (fun i (st,expl) ->
                div_class "ats-choice"
-                 [C.view st; button "pick" (M_pick i); text expl])
+                 [C.view st; button "pick" (M_pick i); text_f "(%s)" expl; ])
             l
         in
-        [button "step" M_step], choices
+        [button "step" M_step], [h2 "choices:"; div_class "ats-choices" choices]
     and v_parents =
-      let view_parent i st =
+      let view_parent i (st,expl) =
         div_class "ats-parent" [
           C.view st;
           button "go back" (M_go_back i);
+          text_f "(next: %s)" expl;
         ]
       in
       if m.parents=[] then []
@@ -115,8 +118,8 @@ module Make_calculus(C : CALCULUS)
           Ok (mk_ parents st') (* just go to [st'] *)
         | Ats.ATS.Error msg ->
           Error msg
-        | Ats.ATS.One (st',_) | Ats.ATS.Choice [st',_] ->
-          Ok (mk_ (st::parents) st')
+        | Ats.ATS.One (st',expl) | Ats.ATS.Choice [st',expl] ->
+          Ok (mk_ ((st,expl)::parents) st')
         | Ats.ATS.Choice _ ->
           Error "need to make a choice"
       end
@@ -124,21 +127,23 @@ module Make_calculus(C : CALCULUS)
       begin match step with
         | Ats.ATS.Done (st',_) -> Ok (mk_ parents st')
         | Ats.ATS.Error msg -> Error msg
-        | Ats.ATS.One (st',_) | Ats.ATS.Choice ((st',_)::_) ->
-          Ok (mk_ (st::parents) st') (* make a choice *)
+        | Ats.ATS.One (st',expl) | Ats.ATS.Choice ((st',expl)::_) ->
+          Ok (mk_ ((st,expl)::parents) st') (* make a choice *)
         | Ats.ATS.Choice _ -> assert false
       end
     | M_pick i ->
       begin match step with
         | Ats.ATS.Choice l ->
-          begin try Ok (mk_ (st::parents) (fst @@ List.nth l i))
+          begin try
+              let st', expl = List.nth l i in
+              Ok (mk_ ((st,expl)::parents) st')
             with _ -> Error "invalid `pick`"
           end
         | _ -> Error "cannot pick a state, not in a choice state"
       end
     | M_go_back i ->
       begin try
-          let st = List.nth parents i in
+          let st, _expl = List.nth parents i in
           Ok (mk_ (CCList.drop (i+1) parents) st)
         with _ -> Error "invalid index in parents"
       end
@@ -149,6 +154,7 @@ module CDCL = Make_calculus(struct
     open Ats.CDCL
     open Calculus_msg
 
+    let name = "cdcl"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
       let status, trail, cs = State.view st in
@@ -166,9 +172,33 @@ module CDCL = Make_calculus(struct
       ]
   end)
 
-(* TODO
-module MCSAT = Make_calculus(Ats.ATS.Make(Ats.MCSAT.A))
-   *)
+module MCSAT = Make_calculus(struct
+    module A = Ats.ATS.Make(Ats.MCSAT.A)
+    open Ats.MCSAT
+    open Calculus_msg
+
+    let name = "mcsat"
+    let view (st:State.t) : Calculus_msg.t Vdom.vdom =
+      let open Vdom in
+      let status, cs, trail, env = State.view st in
+      div_class "ats-state" [
+        pre (Fmt.sprintf "status: %a" State.pp_status status);
+        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
+          Trail.to_iter trail
+          |> Iter.map (fun elt -> pre_f "%a" Trail.pp_trail_elt elt)
+          |> Iter.to_list |> div_class "ats-trail"
+        );
+        details ~short:(Fmt.sprintf "clauses (%d)" (Clause.Set.cardinal cs))
+          (Clause.Set.elements cs |> List.map (fun c -> pre_f "%a" Clause.pp c)
+           |> div_class "ats-clauses"
+        );
+        details ~short:(Fmt.sprintf "env (%d)" (Env.length env))
+          (Env.to_iter env
+           |> Iter.map (fun c -> pre_f "%a" Env.pp_item c) |> Iter.to_list
+           |> div_class "ats-clauses"
+        );
+      ]
+  end)
 
 module App = struct
   open Vdom
@@ -192,21 +222,21 @@ module App = struct
     lm: logic_model;
   }
 
-  let all = ["cdcl"; "mcsat"]
-  let init_ s : logic_model =
-    match s with
-    | "cdcl" -> LM { app=(module CDCL); model=CDCL.init; }
-    | "mcsat" ->
-      assert false (* TODO *)
-    | s -> failwith @@ "unknown system " ^ s
+  let all_ = [
+    "cdcl", LM { app=(module CDCL); model=CDCL.init; };
+    "mcsat", LM { app=(module MCSAT); model=MCSAT.init; }
+  ]
 
   let init : model =
-    { error=None; parse=""; lm=init_ "cdcl";
-    }
+    { error=None; parse=""; lm=List.assoc "mcsat" all_; }
 
   let rec update (m:model) (msg:msg) : model =
     match msg, m with
-    | M_load s, _ -> {error=None; lm=init_ s; parse=""}
+    | M_load s, _ ->
+      begin
+        try let f = List.assoc s all_ in {error=None; lm=f; parse=""}
+        with Not_found -> {m with error=Some (Printf.sprintf "unknown system %s" s)}
+      end
     | M_set_parse s, _ -> {m with parse=s}
     | M_parse, {parse=s; lm; _} ->
       let lm' = match lm with
@@ -231,14 +261,15 @@ module App = struct
       | None -> []
       | Some s -> [div ~a:[color "red"] [text s]]
     and v_load = [ 
-      ul @@ List.map (fun s -> button ("load " ^ s) (M_load s)) all;
+      ul @@ List.map (fun (s,_) -> button ("use " ^ s) (M_load s)) all_;
     ]
-    and v_load_parse_example =
+    and v_load_parse_example = [
       List.map
         (fun (name,s) ->
-           div ~a:[color "cyan"]
-             [button_f (M_and_then (M_set_parse s, M_parse)) "load %S" name])
+           button_f (M_and_then (M_set_parse s, M_parse)) "load %S" name)
         Ats_examples.all
+      |> div_class "ats-parse-examples"
+    ]
     and v_parse = [
       div [
         input [] ~a:[type_ "text"; value parse; oninput (fun s -> M_set_parse s)];
@@ -249,7 +280,9 @@ module App = struct
       | LM {app=(module App); model} ->
         [App.view model |> map (fun x -> M_calculus x)]
     in
-    div @@ List.flatten [v_error; v_load; v_load_parse_example; v_parse; v_lm]
+    div_class "ats" @@ List.flatten [
+      v_error; v_load; v_load_parse_example; v_parse; v_lm;
+    ]
 
   let app = Vdom.simple_app ~init ~update ~view ()
 end

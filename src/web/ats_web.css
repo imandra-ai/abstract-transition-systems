@@ -1,27 +1,40 @@
 /* basic styling */
 
+.ats {
+  max-width: 600px;
+}
+
 .ats-parents {
   display: flex;
   flex-flow: column;
   margin-left: 30px;
-  max-width: 500px;
   justify-content: space-between;
 }
 
 .ats-parent {
   display: flex;
   flex-flow: row wrap;
-  align-items: 0;
+  align-items: center;
   justify-content: start;
+}
+
+.ats-parent > * {
+  padding: 1px;
+  margin-left: 5px;
 }
 
 .ats-state {
   display: flex;
   flex-flow: column wrap;
-  max-width: 500px;
   margin-top: 3px;
   margin-bottom: 3px;
+  background-color: lightskyblue;
   outline: solid teal 1px;
+}
+
+.ats-state > * {
+  padding: 1px;
+  margin: 1px;
 }
 
 .ats-trail {
@@ -36,11 +49,23 @@
   justify-content: normal;
 }
 
-.ats-choice {
+.ats-parse-examples {
+  display: flex;
+  flex-flow: row wrap;
+  background-color: lightsteelblue;
+}
+
+.ats-choices {
   display: flex;
   flex-flow: row wrap;
   justify-content: start;
-  outline: green 2em;
+  align-items: center;
+  border: green solid 3px;
+}
+
+.ats-choice > * {
+  padding: 3px;
+  margin: 5px;
 }
 
 .ats-trail > li {

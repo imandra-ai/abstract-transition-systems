@@ -5,6 +5,7 @@ let () =
   let files =
     CCIO.File.walk_l "../../examples"
     |> CCList.filter_map (function (`File,f) -> Some f | _ -> None)
+    |> List.sort String.compare
   in
   let buf = Buffer.create 256 in
   Printf.bprintf buf "let all = [\n";

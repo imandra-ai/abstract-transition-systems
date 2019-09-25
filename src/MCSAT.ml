@@ -213,6 +213,7 @@ module Env = struct
   }
 
   let empty : t = {ty=Str_map.empty; vars=Str_map.empty; }
+  let length env = Str_map.cardinal env.ty + Str_map.cardinal env.vars
 
   let add_ty (id:ID.t) (env:t) : t =
     if Str_map.mem (ID.name id) env.ty then (
@@ -233,11 +234,11 @@ module Env = struct
       (Str_map.values self.ty |> Iter.map (fun ty -> Ty ty))
       (Str_map.values self.vars |> Iter.map (fun f -> Fun f))
 
+  let pp_item out = function
+    | Ty id -> Fmt.fprintf out "(@[<2>ty@ %a@])" Ty.pp id
+    | Fun v -> Fmt.fprintf out "(@[<2>fun@ %a@ %a@])" Var.pp v Ty.pp (Var.ty v)
+
   let pp out (self:t) =
-    let pp_item out = function
-      | Ty id -> Fmt.fprintf out "(@[<2>ty@ %a@])" Ty.pp id
-      | Fun v -> Fmt.fprintf out "(@[<2>fun@ %a@ %a@])" Var.pp v Ty.pp (Var.ty v)
-    in
     Fmt.fprintf out "(@[%a@])" (Util.pp_iter pp_item) (to_iter self)
 end
 
@@ -508,7 +509,7 @@ module Trail = struct
         lit: Term.t;
         value: Value.t;
         next: t;
-        _level: int lazy_t;
+        level: int;
         _assign: assignment lazy_t; (* assignment, from trail *)
       }
 
@@ -518,17 +519,15 @@ module Trail = struct
 
   let[@inline] level = function
     | Nil -> 0
-    | Cons {_level=lazy l;_} -> l
+    | Cons {level=l;_} -> l
 
   let cons kind (lit:Term.t) (value:Value.t) (next:t) : t =
     let lit, value =
       if Term.sign lit then lit, value else Term.not_ lit, Value.not_ value in
     (* Format.printf "trail.cons %a <- %a@." Term.pp lit Value.pp value; *)
-    let _level = lazy (
-      match kind with
+    let level = match kind with
       | Decision -> 1 + level next
       | BCP _ | Eval -> level next
-    ) 
     and _assign = lazy (
       let a = assign next in
       if Value.is_bool value then (
@@ -538,24 +537,25 @@ module Trail = struct
         a |> Term.Map.add lit value
       )
     ) in
-    Cons { kind; lit; value; next; _assign; _level; }
+    Cons { kind; lit; value; next; _assign; level; }
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty = cons (BCP unit_true) Term.true_ Value.true_ Nil
 
   let rec iter k = function
     | Nil -> ()
-    | Cons {kind;lit;value;next;_} ->
-      k (kind, lit, value);
+    | Cons {kind;lit;value;next;level;_} ->
+      k (kind, level, lit, value);
       iter k next
 
-  let to_iter (tr:t) : (kind * Term.t * Value.t) Iter.t = fun k -> iter k tr
-  let iter_terms (tr:t) : Term.t Iter.t = to_iter tr |> Iter.map (fun (_,t,_) -> t)
-  let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,t,v) -> t,v)
+  let to_iter (tr:t) : (kind * int * Term.t * Value.t) Iter.t = fun k -> iter k tr
+  let iter_terms (tr:t) : Term.t Iter.t = to_iter tr |> Iter.map (fun (_,_,t,_) -> t)
+  let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,_,t,v) -> t,v)
+  let length tr = to_iter tr |> Iter.length
 
-  let pp_trail_elt out (k,lit,v) =
+  let pp_trail_elt out (k,level,lit,v) =
     let cause = match k with Decision -> "*" | BCP _ -> "" | Eval -> "$" in
-    Fmt.fprintf out "(@[%a%s@ <- %a@])" Term.pp lit cause Value.pp v
+    Fmt.fprintf out "[%d](@[%a%s@ <- %a@])" level Term.pp lit cause Value.pp v
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -611,6 +611,8 @@ module State = struct
   let[@inline] to_decide self = Lazy.force self._to_decide
   let[@inline] uf_domain self = Lazy.force self._uf_domain
   let[@inline] uf_sigs self = Lazy.force self._uf_sigs
+
+  let view st = st.status, st.cs, st.trail, st.env
 
   (* compute domains, by looking for [a=b <- false]
      where [a] has a value already but [b] doesn't,
@@ -698,7 +700,7 @@ module State = struct
         Term.pp t Value.pp v Term.pp lit_force Term.pp lit_forbid
     | CUF_forced2 {t;v1;v2;lit_v1;lit_v2} ->
       Fmt.fprintf out
-        "(@[conflict-uf-forced2@ %a @[<- %a@ :by %a@]@ :or @[<- %a@ :by %assert@]@])"
+        "(@[conflict-uf-forced2@ %a @[<- %a@ :by %a@]@ :or @[<- %a@ :by %a@]@])"
         Term.pp t Value.pp v1 Term.pp lit_v1 Value.pp v2 Term.pp lit_v2
     | CUF_congruence {f;t1;t2} ->
       Fmt.fprintf out
@@ -758,11 +760,11 @@ module State = struct
     let open ATS in
     match self.status with
     | Conflict_bool c when Clause.is_empty c ->
-      Some (One (make self.env self.cs self.trail Unsat, "learnt false"))
+      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
     | Conflict_bool c ->
       begin match self.trail with
         | Trail.Nil ->
-          Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
+          Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
         | Trail.Cons {kind=BCP d;lit;next;_} when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
@@ -789,11 +791,11 @@ module State = struct
     let trail = self.trail in
     match self.status, trail with
     | Backjump c, _ when Clause.is_empty c ->
-      Some (One (make self.env self.cs self.trail Unsat, "learnt false"))
-    | Backjump _, Trail.Nil ->
-      Some (One (make self.env self.cs self.trail Unsat, "empty trail")) (* unsat! *)
-    | Backjump _, _ when Trail.level trail = 0 ->
-      Some (One (make self.env self.cs self.trail Unsat, "level 0 trail")) (* unsat! *)
+      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
+    | Backjump c, Trail.Nil ->
+      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
+    | Backjump c, _ when Trail.level trail = 0 ->
+      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "level 0 trail")) (* unsat! *)
     | Backjump c, Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
       assert (kind=Decision);
       let c_reduced = Clause.filter_false (Trail.assign next) c in

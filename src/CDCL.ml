@@ -133,11 +133,11 @@ module State = struct
     let open ATS in
     match self.status with
     | Conflict c when Clause.is_empty c ->
-      Some (One (make self.cs self.trail Unsat, "learnt false"))
+      Some (One (make (c::self.cs) self.trail Unsat, "learnt false"))
     | Conflict c ->
       begin match self.trail with
         | Trail.Nil ->
-          Some (One (make self.cs self.trail Unsat, "empty trail")) (* unsat! *)
+          Some (One (make (c::self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
         | Trail.Cons {kind=Prop d;lit;next;_} when Clause.contains (-lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
@@ -156,12 +156,12 @@ module State = struct
     let open ATS in
     match self.status with
     | Backjump c when Clause.is_empty c ->
-      Some (One (make self.cs self.trail Unsat, "learnt false"))
+      Some (One (make (c::self.cs) self.trail Unsat, "learnt false"))
     | Backjump c ->
       let rec unwind_trail trail =
         match trail with
         | Trail.Nil -> 
-          Some (One (make self.cs self.trail Unsat, "empty trail")) (* unsat! *)
+          Some (One (make (c::self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
         | Trail.Cons {lit; _}
           when Clause.contains (-lit) c
             && Trail.eval_to_false trail (Clause.remove (-lit) c) ->
