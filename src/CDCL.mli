@@ -26,6 +26,7 @@ module Trail : sig
 
   val pp_trail_elt : trail_elt Fmt.printer
   val to_iter : t -> trail_elt Iter.t
+  val pp : t Fmt.printer
   val length : t -> int
 end
 

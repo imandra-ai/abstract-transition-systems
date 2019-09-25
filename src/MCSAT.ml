@@ -561,7 +561,7 @@ module Trail = struct
     Fmt.fprintf out "[%d](@[%a%s@ <- %a@])" level Term.pp lit cause Value.pp v
 
   let pp out (self:t) : unit =
-    Fmt.fprintf out "(@[%a@])" (pp_iter pp_trail_elt) (to_iter self)
+    Fmt.fprintf out "(@[<v>%a@])" (pp_iter pp_trail_elt) (to_iter self)
 end
 
 module State = struct

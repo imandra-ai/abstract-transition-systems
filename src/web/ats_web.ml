@@ -3,6 +3,7 @@ module Fmt = CCFormat
 module Vdom = struct
   include Vdom
   let h2 x = elt "h2" [text x]
+  let h3 x = elt "h3" [text x]
   let pre x = elt "pre" [text x]
   let pre_f fmt = Fmt.ksprintf ~f:pre fmt
   let ul l = elt "ul" @@ List.map (fun x -> elt "li" [x]) l
@@ -12,10 +13,11 @@ module Vdom = struct
   let text_f fmt = Fmt.ksprintf ~f:text fmt
   let button_f act fmt = Fmt.ksprintf ~f:(fun x -> button x act) fmt
 
-  let details ?short x =
+  let details ?(a=[]) ?(open_=false) ?short x =
     let open Vdom in
     let l = match short with None -> [x] | Some s -> [elt "summary" [text s]; x] in
-    Vdom.(elt "details" l)
+    let a = if open_ then str_prop "open" "true"::a else a in
+    elt ~a "details" l
 end
 
 module Calculus_msg = struct
@@ -100,7 +102,7 @@ module Make_calculus(C : CALCULUS)
       in
       if n=0 then []
        else [
-         details ~short:(Printf.sprintf "previous (%d)" n)
+         details ~open_:true ~short:(Printf.sprintf "previous (%d)" n)
            (div_class "ats-parents" @@ List.mapi view_parent m.parents)]
     in
     div @@ List.flatten [
@@ -170,16 +172,16 @@ module CDCL = Make_calculus(struct
       let open Vdom in
       let status, trail, cs = State.view st in
       div_class "ats-state" [
-        pre (Fmt.sprintf "status: %a" State.pp_status status);
-        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
-          Trail.to_iter trail
+        div [h3 "status: "; pre (Fmt.to_string State.pp_status status)];
+        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
+          ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]" Trail.pp trail)]
+          (Trail.to_iter trail
           |> Iter.map
             (fun elt -> pre (Fmt.to_string Trail.pp_trail_elt elt))
-          |> Iter.to_list |> div_class "ats-trail"
-        );
-        details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs)) (
-          List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses"
-        );
+          |> Iter.to_list |> div_class "ats-trail");
+        details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs))
+          ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]@." (Fmt.Dump.list Clause.pp) cs)]
+          (List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses");
       ]
   end)
 
@@ -194,12 +196,14 @@ module MCSAT = Make_calculus(struct
       let status, cs, trail, env = State.view st in
       div_class "ats-state" [
         pre (Fmt.sprintf "status: %a" State.pp_status status);
-        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
-          Trail.to_iter trail
+        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
+          ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]@." Trail.pp trail)]
+          (Trail.to_iter trail
           |> Iter.map (fun elt -> pre_f "%a" Trail.pp_trail_elt elt)
           |> Iter.to_list |> div_class "ats-trail"
         );
         details ~short:(Fmt.sprintf "clauses (%d)" (Clause.Set.cardinal cs))
+          ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]@." (Clause.Set.pp Clause.pp) cs)]
           (Clause.Set.elements cs |> List.map (fun c -> pre_f "%a" Clause.pp c)
            |> div_class "ats-clauses"
         );
@@ -260,7 +264,7 @@ module App = struct
           App.parse s |> CCResult.map (fun m -> LM {app; model=m})
       in
       begin match lm' with
-        | Ok lm' -> {m with error=None; lm=lm'}
+        | Ok lm' -> {m with error=None; lm=lm'; parse="";}
         | Error msg ->
           {m with error=Some msg}
       end
