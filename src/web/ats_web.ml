@@ -89,24 +89,25 @@ module Make_calculus(C : CALCULUS)
         in
         [button "step" M_step], [h2 "choices:"; div_class "ats-choices" choices]
     and v_parents =
+      let n = List.length m.parents in
       let view_parent i (st,expl) =
         div_class "ats-parent" [
-          C.view st;
+          div ~key:(Printf.sprintf "parent-%d" (n-i)) [C.view st];
           button "go back" (M_go_back i);
           text_f "(next: %s)" expl;
         ]
       in
-      if m.parents=[] then []
+      if n=0 then []
        else [
-         details ~short:(Printf.sprintf "previous (%d)" (List.length m.parents))
+         details ~short:(Printf.sprintf "previous (%d)" n)
            (div_class "ats-parents" @@ List.mapi view_parent m.parents)]
     in
     div @@ List.flatten [
       [h2 name];
       v_actions_pre;
-      [C.view m.st];
+      [div ~key:"ats-state" [C.view m.st]];
       v_actions_post;
-      v_parents;
+      [div ~key:"ats-parents" @@ v_parents];
     ]
 
   let update (m:model) (msg:msg) : _ result =
