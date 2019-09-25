@@ -15,6 +15,7 @@ module App = struct
   let pre_f fmt = Fmt.ksprintf ~f:pre fmt
   let ul l = elt "ul" @@ List.map (fun x -> elt "li" [x]) l
   let button txt msg = input [] ~a:[onclick (fun _ -> msg); type_button; value txt]
+  let div_class c x = elt "div" ~a:[class_ c] x
 
   let details ?short x =
     let open Vdom in
@@ -31,16 +32,16 @@ module App = struct
     open Ats.CDCL
     let view (st:A.State.t) =
       let status, trail, cs = State.view st in
-      div [
+      div_class "ats-state" [
         pre (Fmt.sprintf "status: %a" State.pp_status status);
         details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
           Trail.to_iter trail
           |> Iter.map
             (fun elt -> pre (Fmt.to_string Trail.pp_trail_elt elt))
-          |> Iter.to_list |> ul
+          |> Iter.to_list |> ul |> CCList.return |> div_class "ats-trail"
         );
         details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs)) (
-          List.map (fun c -> pre_f "%a" Clause.pp c) cs |> ul
+          List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses"
         );
       ]
   end
@@ -90,30 +91,32 @@ module App = struct
       begin match CCParse.parse_string A.A.State.parse parse with
         | Ok st ->
           let step = A.A.next st in
-          {m with lm=LM {a with st; step; }}
+          {m with lm=LM {a with st; step; }; error=None;}
         | Error msg ->
           {m with error=Some msg}
       end
     | M_next, {lm=LM ({ats=(module A); st; step; _} as a); _} ->
       begin match step with
         | Ats.ATS.Done (st',_) ->
-          {m with lm=LM {a with st=st'; }} (* just go to [st'] *)
+          {m with lm=LM {a with st=st'; }; error=None} (* just go to [st'] *)
         | Ats.ATS.Error msg ->
           {m with error=Some msg}
         | Ats.ATS.One (st',_) | Ats.ATS.Choice [st',_] ->
-          {m with lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
+          {m with error=None; lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
         | Ats.ATS.Choice _ ->
           {m with error=Some "need to make a choice"}
       end
     | M_step, {lm=LM ({ats=(module A); st; step; _} as a); _} ->
       begin match step with
         | Ats.ATS.Done (st',_) ->
-          {m with lm=LM {a with st=st'; }} (* just go to [st'] *)
+          {m with lm=LM {a with st=st'; }; error=None} (* just go to [st'] *)
         | Ats.ATS.Error msg ->
           {m with error=Some msg}
         | Ats.ATS.One (st',_) | Ats.ATS.Choice ((st',_)::_) ->
           (* make a choice *)
-          {m with lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
+          {m with
+           error=None;
+           lm=LM {a with st=st'; parents=st::a.parents; step=A.A.next st'}}
         | Ats.ATS.Choice _ -> assert false
       end
 
@@ -127,7 +130,7 @@ module App = struct
     ]
     and v_actions = match step with
       | Ats.ATS.One _ | Ats.ATS.Done _ | Ats.ATS.Error _ ->
-        [button "next" M_next; button "step" M_step]
+        [button "step" M_step; button "next" M_next]
       | Ats.ATS.Choice _ ->
         [button "step" M_step]
     and v_parse = [
@@ -140,10 +143,9 @@ module App = struct
     let v_lm = [
       div @@ List.flatten [
         [h2 A.A.name];
-        (if a.parents=[] then []
-         else [
-               details ~short:(Printf.sprintf "previous (%d)" (List.length a.parents))
-               (div (List.rev_map A.view a.parents))]);
+        (if a.parents=[] then [] else [
+              details ~short:(Printf.sprintf "previous (%d)" (List.length a.parents))
+                (div_class "ats-parents" [ul @@ List.rev_map A.view a.parents])]);
         [A.view a.st]
       ];
     ] in

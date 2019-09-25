@@ -11,4 +11,4 @@
 (install
  (section bin)
  (package ats-web)
- (files ./ats_web.bc.js ats_web.html))
+ (files ./ats_web.bc.js ats_web.html ats_web.css))
