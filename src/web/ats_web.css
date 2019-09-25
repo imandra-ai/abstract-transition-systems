@@ -4,6 +4,15 @@
   max-width: 800px;
 }
 
+.ats-status {
+  display: flex;
+  flex-flow: row;
+  align-items: center;
+}
+.ats-status * {
+  padding-left: 3px;
+}
+
 .ats-parents {
   display: flex;
   flex-flow: column;

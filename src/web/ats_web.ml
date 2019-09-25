@@ -4,6 +4,8 @@ module Vdom = struct
   include Vdom
   let h2 x = elt "h2" [text x]
   let h3 x = elt "h3" [text x]
+  let h4 x = elt "h4" [text x]
+  let h5 x = elt "h5" [text x]
   let pre x = elt "pre" [text x]
   let pre_f fmt = Fmt.ksprintf ~f:pre fmt
   let ul l = elt "ul" @@ List.map (fun x -> elt "li" [x]) l
@@ -172,7 +174,7 @@ module CDCL = Make_calculus(struct
       let open Vdom in
       let status, trail, cs = State.view st in
       div_class "ats-state" [
-        div [h3 "status: "; pre (Fmt.to_string State.pp_status status)];
+        div_class "ats-status" [h5 "status: "; pre (Fmt.to_string State.pp_status status)];
         details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
           ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]" Trail.pp trail)]
           (Trail.to_iter trail
@@ -195,7 +197,7 @@ module MCSAT = Make_calculus(struct
       let open Vdom in
       let status, cs, trail, env = State.view st in
       div_class "ats-state" [
-        pre (Fmt.sprintf "status: %a" State.pp_status status);
+        div_class "ats-status" [h5 "status: "; pre (Fmt.to_string State.pp_status status)];
         details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
           ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]@." Trail.pp trail)]
           (Trail.to_iter trail
