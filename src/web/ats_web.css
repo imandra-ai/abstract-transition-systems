@@ -1,7 +1,7 @@
 /* basic styling */
 
 .ats {
-  max-width: 600px;
+  max-width: 800px;
 }
 
 .ats-parents {
@@ -16,6 +16,7 @@
   flex-flow: row wrap;
   align-items: center;
   justify-content: start;
+  box-shadow: 3px 3px 4px black;
 }
 
 .ats-parent > * {
@@ -30,6 +31,8 @@
   margin-bottom: 3px;
   background-color: lightskyblue;
   outline: solid teal 1px;
+  box-shadow: 3px 3px 4px black;
+  min-width: 300px;
 }
 
 .ats-state > * {
@@ -38,7 +41,7 @@
 }
 
 .ats-trail {
-  display: flow-root;
+  display: flex;
   flex-flow: column;
   justify-content: normal;
 }
