@@ -68,7 +68,7 @@ module Make_calculus(C : CALCULUS)
     { st; parents; step=next st; }
 
   let parse (s:string) : _ result =
-    match CCParse.parse_string State.parse s with
+    match Ats.Sexp_parser.parse_string_str State.parse s with
     | Error msg -> Error msg
     | Ok st -> Ok (mk_ [] st)
 

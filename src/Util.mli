@@ -1,5 +1,5 @@
 module Fmt = CCFormat
-module P = CCParse
+module P = Sexp_parser
 
 val pp_list : ?sep:string -> 'a Fmt.printer -> 'a list Fmt.printer
 val pp_iter : ?sep:string -> 'a Fmt.printer -> 'a Iter.t Fmt.printer

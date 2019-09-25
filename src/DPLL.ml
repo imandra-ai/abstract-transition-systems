@@ -5,7 +5,7 @@ module Lit = struct
   let compare = CCInt.compare
   let abs = abs
   let pp = Fmt.int
-  let parse = P.(skip_white *> U.int)
+  let parse = P.int
   module As_key = struct type nonrec t = t let compare=compare end
   module Set = CCSet.Make(As_key)
   module Map = CCMap.Make(As_key)
@@ -14,11 +14,7 @@ end
 module Clause = struct
   type t = Lit.t list
   let pp out c = Fmt.fprintf out "(@[%a@])" (pp_list Lit.pp) c
-
-  let parse : t P.t =
-    let open P in
-    parsing "clause"
-      (skip_white *> char '(' *> many (try_ Lit.parse)) <* skip_white <* char ')'
+  let parse : t P.t = P.(parsing "clause" (list Lit.parse))
 end
 
 module State = struct
@@ -76,10 +72,8 @@ module State = struct
       (pp_list pp_trail_elt) self.trail
 
   let parse : t P.t =
-    let open P in
-    (skip_white *> char '(' *>
-     parsing "clause list" (many Clause.parse <* skip_white) <* char ')')
-    >|= fun cs -> make cs [] Searching
+    P.(parsing "clause list" (list Clause.parse)
+       >|= fun cs -> make cs [] Searching)
 
   let eval_to_false (self:t) (c:Clause.t) : bool =
     let lazy assign = self._assign in

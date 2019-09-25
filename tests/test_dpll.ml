@@ -14,7 +14,7 @@ let pbs = [
 let test_parse (pb,res) : unit A.test_case =
   let must_parse = CCOpt.is_some res in
   A.test_case (Printf.sprintf "pb_must_parse:%b" must_parse) `Quick @@ fun () ->
-  match CCParse.parse_string D.State.parse pb with
+  match Ats.Sexp_parser.parse_string_str D.State.parse pb with
   | Ok _ ->
     if not must_parse then A.failf "%S should not parse" pb
   | Error msg -> if must_parse then A.failf "%S failed to parse: %s" pb msg

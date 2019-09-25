@@ -2,4 +2,4 @@
  (name ats)
  (public_name ats)
  (flags :standard -warn-error -7-27-32-33)
- (libraries containers iter))
+ (libraries containers containers.sexp iter))

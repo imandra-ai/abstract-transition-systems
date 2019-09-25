@@ -18,7 +18,7 @@ module type BASIC = sig
     type t
     val empty : t
     val pp : t Fmt.printer
-    val parse : t P.t
+    val parse : t Sexp_parser.t
   end
 
   (** A set of rules, by decreasing layer of priority. Each rule

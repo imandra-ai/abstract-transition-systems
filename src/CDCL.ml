@@ -5,7 +5,7 @@ module Lit = struct
   let compare = CCInt.compare
   let abs = abs
   let pp = Fmt.int
-  let parse = P.(skip_white *> U.int)
+  let parse = P.int
   module As_key = struct type nonrec t = t let compare=compare end
   module Set = CCSet.Make(As_key)
   module Map = CCMap.Make(As_key)
@@ -29,11 +29,7 @@ module Clause = struct
       let c' = remove lit c in
       if is_empty c' then Some lit else None
 
-  let parse : t P.t =
-    let open P in
-    parsing "clause"
-      ((skip_white *> char '(' *> many (try_ Lit.parse) >|= Lit.Set.of_list)
-       <* skip_white <* char ')')
+  let parse : t P.t = P.(parsing "clause" (list Lit.parse >|= Lit.Set.of_list))
 end
 
 module Trail = struct
@@ -124,10 +120,8 @@ module State = struct
       pp_status self.status (pp_list Clause.pp) self.cs Trail.pp self.trail
 
   let parse : t P.t =
-    let open P in
-    (skip_white *> char '(' *>
-     parsing "clause list" (many Clause.parse <* skip_white) <* char ')')
-    >|= fun cs -> make cs Trail.empty Searching
+    P.(parsing "clause list" (list Clause.parse)
+       >|= fun cs -> make cs Trail.empty Searching)
 
   let resolve_conflict_ (self:t) : _ ATS.step option =
     let open ATS in

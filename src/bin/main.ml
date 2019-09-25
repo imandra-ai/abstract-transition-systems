@@ -1,5 +1,6 @@
 open Util
 module ATS = ATS
+module P = CCParse
 
 let ats_l : ATS.t list = [
   DPLL.ats;
@@ -45,7 +46,11 @@ module Make_cmd(A: ATS.S) = struct
       <|> (try_ (string "show") *> return Show)
       <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
       <|> (try_ (string "step") *> return (Auto 1))
-      <|> (try_ (string "init") *> skip_white *> (A.State.parse >|= fun st -> Init st))
+      <|> (try_ (string "init") *> skip_white *>
+           (P.chars_if (fun _ -> true) >>= fun s ->
+            match Sexp_parser.parse_string_str A.State.parse s with
+            | Ok st -> P.return (Init st)
+            | Error msg -> P.fail msg))
       <|> (try_ (string "load") *> skip_white *> (parse_filename >|= fun f -> Load f))
       <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
       <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
@@ -207,13 +212,14 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       choices_ := None;
       cur_st_ := st
     | Cmd.Load filename ->
-      begin match P.parse_file A.State.parse filename with
+      begin match Sexp_parser.parse_file A.State.parse filename with
         | Ok st ->
           done_ := false;
           choices_ := None;
           cur_st_ := st
         | Error msg ->
-          Fmt.printf "@{<Red>error@}: cannot parse %S:\n%s@." filename msg
+          Fmt.printf "@{<Red>error@}: cannot parse %S:\n%a@."
+            filename Sexp_parser.pp_error msg
       end
     | Cmd.Pick i ->
       begin match !choices_, CCOpt.flat_map (fun l -> List.nth_opt l i) !choices_ with

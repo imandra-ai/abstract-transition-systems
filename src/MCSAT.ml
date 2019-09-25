@@ -73,25 +73,27 @@ end = struct
     | Arrow (a,b) -> Fmt.fprintf out "(@[->@ %a@ %a@])" pp a pp b
 
   type env = t Str_map.t
-  let parse env =
-    let open P in
-    fix (fun self ->
-      (try_ (skip_white *> string "bool") *> return bool) <|>
-      (try_ (skip_white *> string "rat") *> return rat) <|>
-      (try_ (skip_white *> U.word) >>= fun s ->
-       (match Str_map.get s env with
-        | Some ty -> return ty
-        | None -> failf "not in scope: type %S" s)) <|>
-      (try_ (skip_white *> char '(') *> skip_white *>
-       string "->" *> skip_white *>
-       (parsing "arrow argument" self <* skip_white
-        >>= fun a -> many (self <* skip_white) >|= fun rest ->
-        match List.rev (a::rest) with
-        | [] -> assert false
-        | [ret] -> ret
-        | ret :: args -> arrow_l (List.rev args) ret)
-       <* skip_white <* char ')')
-      )
+  let parse env : t P.t =
+    let open P.Infix in
+    P.fix (fun self ->
+        P.match_
+          ~atom:(P.string >>= function
+            | "bool" -> P.return bool
+            | "rat" -> P.return rat
+            | s ->
+              begin match Str_map.get s env with
+                | Some ty -> P.return ty
+                | None -> P.failf "not in scope: type %S" s
+              end)
+          ~list:(P.parsing "ty" @@ P.uncons P.string (function
+              | "->" ->
+                P.list self >>= fun args ->
+                begin match List.rev args with
+                  | [] | [_] -> P.fail "-> needs at least 2 arguments"
+                  | ret :: args -> P.return (arrow_l (List.rev args) ret)
+                end
+              | s -> P.failf "unknown type constructor %S" s
+            )))
 
   module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
   module Tbl = CCHashtbl.Make(As_key)
@@ -130,7 +132,7 @@ end = struct
     with Not_found -> P.failf "not in scope: variable %S" s
   let parse env : t P.t =
     let open P.Infix in
-    P.try_ P.U.word >>= parse_string env
+    P.string >>= parse_string env
 
   module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
   module Map = CCMap.Make(As_key)
@@ -404,22 +406,20 @@ end = struct
   let parse (env:Env.t) : t P.t =
     let open P.Infix in
     P.fix (fun self ->
-        let self' = P.try_ (self <* P.skip_white) in
-        P.(try_ (string "true") *> return true_) <|>
-        P.(try_ (string "false") *> return false_) <|>
-        (P.try_ P.U.word >>= Var.parse_string env.Env.vars >|= const) <|>
-        (P.try_ (P.char '(') *> P.skip_space *>
-         ( (P.try_ (P.char '=') *> P.skip_white *>
-            (self' >>= fun a -> self' <* P.skip_white <* P.char ')'
-             >|= fun b -> eq a b)) <|>
-           (P.try_ (P.string "not") *> P.skip_white *> (self' >|= not_)
-            <* P.skip_white <* P.char ')') <|>
-           (* apply *)
-           (P.try_ P.U.word <* P.skip_white >>= Var.parse_string env.Env.vars
-            >>= fun f -> P.many self' <* P.skip_white <* P.char ')'
-            >|= fun l -> app f l)
-         ) ) <?> "expected term"
-      )
+        P.match_
+          ~atom:(P.string >>= function
+          | "true" -> P.return true_
+          | "false" -> P.return false_
+          | s ->
+            Var.parse_string env.Env.vars s >|= const)
+          ~list:(P.parsing "expr" @@ P.uncons P.string (function
+              | "=" -> P.parsing "equality" (P.list2 self self) >|= fun (a,b) -> eq a b
+              | "not" -> P.parsing "negation" (P.list1 self) >|= not_
+              | s ->
+                Var.parse_string env.Env.vars s >>= fun f ->
+                P.list self >|= fun l ->
+                app f l
+            )))
 end
 
 module SigMap = CCMap.Make(struct
@@ -457,11 +457,14 @@ module Clause = struct
 
   let parse (env:Env.t) : t P.t =
     let open P in
-    skip_white *> parsing "clause" (
-      (try_ (char '(' *> string "or") *> skip_white *>
-       (many (try_ (Term.parse env) <* skip_white) <* char ')' >|= Term.Set.of_list)) <|>
-      (Term.parse env >|= Term.Set.singleton)
-    )
+    parsing "clause"
+      (one_of [
+          ("single-term", Term.parse env >|= Term.Set.singleton);
+          ("or", uncons string
+             (function
+               | "or" -> list (Term.parse env) >|= Term.Set.of_list
+               | s -> failf "expected `or`, not %S" s));
+        ])
 
   (* semantic evaluation *)
   let rec eval_lit_semantic (ass:assignment) (t:Term.t) : bool option =
@@ -724,35 +727,31 @@ module State = struct
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
     let open P in
-    (* assert *)
-    (try_ (char '(' *> skip_white *> string "assert") *> skip_white *>
-     (parsing "assert" (Clause.parse env)
-      >|= fun c -> (env,c::cs)) <* skip_white <* char ')') <|>
-    (* new type *)
-    (try_ (char '(' *> skip_white *> string "ty") *> skip_white *>
-     parsing "ty"
-       (U.word >|= fun ty -> Env.add_ty (ID.make ty) env, cs) <* skip_white <* char ')') <|>
-    (* new function *)
-    (try_ (char '(' *> skip_white *> string "fun") *> skip_white *>
-     parsing "fun" (U.word >>= fun f ->
-      (skip_white *> parsing "ty" (Ty.parse env.Env.ty) <* skip_white <* char ')') >|= fun ty ->
-      let v = Var.make (ID.make f) ty in
-      Env.add_var v env, cs))
+    parsing "statement" @@ uncons string (function
+        | "assert" ->
+          (* assert *)
+          parsing "assert" (list1 (Clause.parse env)) >|= fun c -> env, c::cs
+        | "ty" ->
+          (* new type *)
+          parsing "type decl" (list1 string) >|= fun ty -> Env.add_ty (ID.make ty) env, cs
+        | "fun" ->
+          (* new function *)
+          parsing "fun decl" (list2 string (Ty.parse env.Env.ty)) >|= fun (f,ty) ->
+          let v = Var.make (ID.make f) ty in
+          Env.add_var v env, cs
+        | s -> failf "unknown statement %s" s)
 
   let rec parse_rec (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
     let open P in
-    skip_white *> (
-      (* done *)
-      (try_ (char ')') *> return (env, List.rev cs)) <|>
-      (* one statement, then recurse *)
-      (try_ (parsing "statement" @@ parse_one env cs)
-       >>= fun (env,cs) -> parse_rec env cs)
-    )
+    is_nil >>= function
+    | true -> return (env, List.rev cs)
+    | false ->
+      uncons (parse_one env cs) (fun (env, cs) -> parse_rec env cs)
 
   let parse : t P.t =
-    let open P in
-    (skip_white *> char '(' *> parse_rec Env.empty [])
-    >|= fun (env,cs) -> make env (Clause.Set.of_list cs) Trail.empty Searching
+    let open P.Infix in
+    parse_rec Env.empty [] >|= fun (env,cs) ->
+    make env (Clause.Set.of_list cs) Trail.empty Searching
 
   (* ######### *)
 
