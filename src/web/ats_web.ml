@@ -22,6 +22,7 @@ module Calculus_msg = struct
   type t =
     | M_next
     | M_step
+    | M_auto of int
     | M_pick of int
     | M_go_back of int
 end
@@ -110,6 +111,21 @@ module Make_calculus(C : CALCULUS)
       [div ~key:"ats-parents" @@ v_parents];
     ]
 
+  let do_step m =
+    let {parents; st; step } = m in
+    match step with
+    | Ats.ATS.Done (st',_) -> Ok (mk_ parents st')
+    | Ats.ATS.Error msg -> Error msg
+    | Ats.ATS.One (st',expl) | Ats.ATS.Choice ((st',expl)::_) ->
+      Ok (mk_ ((st,expl)::parents) st') (* make a choice *)
+    | Ats.ATS.Choice _ -> assert false
+
+  let rec do_auto n m =
+    if n=0 then Ok m
+    else match do_step m with
+      | Error e -> Error e
+      | Ok m' -> do_auto (n-1) m'
+
   let update (m:model) (msg:msg) : _ result =
     let {parents; st; step } = m in
     match msg with
@@ -124,14 +140,8 @@ module Make_calculus(C : CALCULUS)
         | Ats.ATS.Choice _ ->
           Error "need to make a choice"
       end
-    | M_step ->
-      begin match step with
-        | Ats.ATS.Done (st',_) -> Ok (mk_ parents st')
-        | Ats.ATS.Error msg -> Error msg
-        | Ats.ATS.One (st',expl) | Ats.ATS.Choice ((st',expl)::_) ->
-          Ok (mk_ ((st,expl)::parents) st') (* make a choice *)
-        | Ats.ATS.Choice _ -> assert false
-      end
+    | M_step -> do_step m
+    | M_auto n -> do_auto n m
     | M_pick i ->
       begin match step with
         | Ats.ATS.Choice l ->
@@ -208,6 +218,7 @@ module App = struct
     | M_load of string
     | M_set_parse of string
     | M_parse
+    | M_set_auto of string
     | M_calculus of Calculus_msg.t
     | M_and_then of msg * msg
 
@@ -220,6 +231,7 @@ module App = struct
   type model = {
     error: string option;
     parse: string;
+    auto: int;
     lm: logic_model;
   }
 
@@ -229,16 +241,19 @@ module App = struct
   ]
 
   let init : model =
-    { error=None; parse=""; lm=List.assoc "mcsat" all_; }
+    { error=None; parse=""; auto=20; lm=List.assoc "mcsat" all_; }
 
   let rec update (m:model) (msg:msg) : model =
     match msg, m with
     | M_load s, _ ->
       begin
-        try let f = List.assoc s all_ in {error=None; lm=f; parse=""}
+        try let f = List.assoc s all_ in {m with error=None; lm=f; parse=""}
         with Not_found -> {m with error=Some (Printf.sprintf "unknown system %s" s)}
       end
     | M_set_parse s, _ -> {m with parse=s}
+    | M_set_auto s, _ ->
+      (try {m with auto=int_of_string s}
+       with _ -> {m with error=Some "auto should be an integer"})
     | M_parse, {parse=s; lm; _} ->
       let lm' = match lm with
         | LM {app=(module App) as app; _} ->
@@ -257,7 +272,7 @@ module App = struct
     | M_and_then (m1,m2), _ -> update (update m m1) m2
 
   let view (m:model) =
-    let {error; parse; lm} = m in
+    let {error; parse; lm; auto} = m in
     let v_error = match error with
       | None -> []
       | Some s -> [div ~a:[color "red"] [text s]]
@@ -277,12 +292,20 @@ module App = struct
         button "parse" M_parse;
       ]
     ]
+    and v_auto = [
+      div [
+        button "auto" (M_calculus (Calculus_msg.M_auto auto));
+        input []
+          ~a:[type_ "text"; value (string_of_int auto);
+              oninput (fun s -> M_set_auto s)];
+      ]
+    ]
     and v_lm = match lm with
       | LM {app=(module App); model} ->
         [App.view model |> map (fun x -> M_calculus x)]
     in
     div_class "ats" @@ List.flatten [
-      v_error; v_load; v_load_parse_example; v_parse; v_lm;
+      v_error; v_load; v_load_parse_example; v_parse; v_auto; v_lm;
     ]
 
   let app = Vdom.simple_app ~init ~update ~view ()
