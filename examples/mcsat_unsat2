@@ -1,0 +1,9 @@
+(
+  (ty a)
+  (fun x a)
+  (fun y a)
+  (fun z a)
+  (assert (= x y))
+  (assert (= y z))
+  (assert (not (= x z)))
+)

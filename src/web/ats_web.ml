@@ -8,6 +8,9 @@ module Vdom = struct
   let ul l = elt "ul" @@ List.map (fun x -> elt "li" [x]) l
   let button txt msg = input [] ~a:[onclick (fun _ -> msg); type_button; value txt]
   let div_class c x = elt "div" ~a:[class_ c] x
+  let color s = style "color" s
+  let text_f fmt = Fmt.ksprintf ~f:text fmt
+  let button_f act fmt = Fmt.ksprintf ~f:(fun x -> button x act) fmt
 
   let details ?short x =
     let open Vdom in
@@ -100,7 +103,8 @@ module Make_calculus(C : CALCULUS)
       v_actions_pre;
       [C.view m.st];
       v_actions_post;
-      v_parents]
+      v_parents;
+    ]
 
   let update (m:model) (msg:msg) : _ result =
     let {parents; st; step } = m in
@@ -174,6 +178,7 @@ module App = struct
     | M_set_parse of string
     | M_parse
     | M_calculus of Calculus_msg.t
+    | M_and_then of msg * msg
 
   type logic_model =
     | LM : {
@@ -199,7 +204,7 @@ module App = struct
     { error=None; parse=""; lm=init_ "cdcl";
     }
 
-  let update (m:model) (msg:msg) =
+  let rec update (m:model) (msg:msg) : model =
     match msg, m with
     | M_load s, _ -> {error=None; lm=init_ s; parse=""}
     | M_set_parse s, _ -> {m with parse=s}
@@ -218,18 +223,22 @@ module App = struct
         | Ok lm -> {m with error=None; lm=LM {app; model=lm}}
         | Error msg -> {m with error=Some msg}
       end
-      (* TODO
-    | M_cdcl _, _ -> {m with error=Some "invalid message for CDCL";}
-         *)
+    | M_and_then (m1,m2), _ -> update (update m m1) m2
 
   let view (m:model) =
     let {error; parse; lm} = m in
     let v_error = match error with
       | None -> []
-      | Some s -> [div ~a:[style "color" "red"] [text s]]
+      | Some s -> [div ~a:[color "red"] [text s]]
     and v_load = [ 
       ul @@ List.map (fun s -> button ("load " ^ s) (M_load s)) all;
     ]
+    and v_load_parse_example =
+      List.map
+        (fun (name,s) ->
+           div ~a:[color "cyan"]
+             [button_f (M_and_then (M_set_parse s, M_parse)) "load %S" name])
+        Ats_examples.all
     and v_parse = [
       div [
         input [] ~a:[type_ "text"; value parse; oninput (fun s -> M_set_parse s)];
@@ -240,7 +249,7 @@ module App = struct
       | LM {app=(module App); model} ->
         [App.view model |> map (fun x -> M_calculus x)]
     in
-    div @@ List.flatten [v_error; v_load; v_parse; v_lm]
+    div @@ List.flatten [v_error; v_load; v_load_parse_example; v_parse; v_lm]
 
   let app = Vdom.simple_app ~init ~update ~view ()
 end

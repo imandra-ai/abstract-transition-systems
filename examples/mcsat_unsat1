@@ -1,0 +1,9 @@
+(
+  (ty a)
+  (fun p (-> a bool))
+  (fun x a)
+  (fun y a)
+  (assert (or false (p x)))
+  (assert (= x y))
+  (assert (not (p y)))
+)

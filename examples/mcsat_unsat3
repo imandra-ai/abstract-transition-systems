@@ -1,0 +1,8 @@
+
+(
+  (ty a)
+  (fun x a)
+  (fun f (-> a a))
+  (assert (= x (f x)))
+  (assert (not (= x (f (f (f x))))))
+)
