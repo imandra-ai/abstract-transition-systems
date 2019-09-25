@@ -15,10 +15,18 @@ module Vdom = struct
     Vdom.(elt "details" l)
 end
 
+module Calculus_msg = struct
+  type t =
+    | M_next
+    | M_step
+    | M_pick of int
+    | M_go_back of int
+end
+
 module type APP_CALCULUS = sig
   val name : string
 
-  type msg
+  type msg = Calculus_msg.t
   type model
 
   val parse : string -> (model, string) result
@@ -28,22 +36,24 @@ module type APP_CALCULUS = sig
   val update : model -> msg -> (model, string) result
 end
 
-module CDCL
+module type CALCULUS = sig
+  module A : Ats.ATS.S
+  val view : A.State.t -> Calculus_msg.t Vdom.vdom
+end
+
+module Make_calculus(C : CALCULUS)
   : APP_CALCULUS
 = struct
-  open Ats.CDCL
-  module A = Ats.ATS.Make(Ats.CDCL.A)
+  open C.A
+  open Calculus_msg
 
   let name = "cdcl"
-  type msg =
-    | M_next
-    | M_step
-    | M_go_back of int
 
+  type msg = Calculus_msg.t
   type model = {
-    parents: A.State.t list; (* parent states *)
-    st: A.State.t; (* current state *)
-    step: (A.State.t * string) Ats.ATS.step;
+    parents: State.t list; (* parent states *)
+    st: State.t; (* current state *)
+    step: (State.t * string) Ats.ATS.step;
   }
 
   let init =
@@ -51,58 +61,46 @@ module CDCL
     { st; parents=[]; step=Ats.ATS.Done (st, ""); }
 
   let mk_ parents st =
-    { st; parents; step=A.next st; }
+    { st; parents; step=next st; }
 
   let parse (s:string) : _ result =
     match CCParse.parse_string State.parse s with
     | Error msg -> Error msg
     | Ok st -> Ok (mk_ [] st)
 
-  let view_st (st:State.t) : msg Vdom.vdom =
-    let open Vdom in
-    let status, trail, cs = State.view st in
-    div_class "ats-state" [
-      pre (Fmt.sprintf "status: %a" State.pp_status status);
-      details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
-        Trail.to_iter trail
-        |> Iter.mapi
-          (fun i elt ->
-             div [
-               pre (Fmt.to_string Trail.pp_trail_elt elt);
-               button "go" (M_go_back i);
-             ])
-        |> Iter.to_list |> ul |> CCList.return |> div_class "ats-trail"
-      );
-      details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs)) (
-        List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses"
-      );
-    ]
-
   let view (m: model) : _ Vdom.vdom =
     let open Vdom in
-    let v_actions = match m.step with
+    let v_actions_pre, v_actions_post = match m.step with
       | Ats.ATS.One _ | Ats.ATS.Done _ | Ats.ATS.Error _ ->
-        [button "step" M_step; button "next" M_next]
-      | Ats.ATS.Choice _ ->
-        [button "step" M_step]
-    and v_lm = [
+        [button "step" M_step; button "next" M_next], []
+      | Ats.ATS.Choice [_] -> [button "step" M_step], []
+      | Ats.ATS.Choice l ->
+        let choices =
+          List.mapi
+            (fun i (st,expl) ->
+               div_class "ats-choice"
+                 [C.view st; button "pick" (M_pick i); text expl])
+            l
+        in
+        [button "step" M_step], choices
+    and v_parents =
       let view_parent i st =
-        div [
-          view_st st;
-          button "go" (M_go_back i);
+        div_class "ats-parent" [
+          C.view st;
+          button "go back" (M_go_back i);
         ]
       in
-      div @@ List.flatten [
-        [h2 name];
-        (if m.parents=[] then []
-         else [
-           details ~short:(Printf.sprintf "previous (%d)" (List.length m.parents))
-             (div_class "ats-parents"
-                [ul @@ List.rev (List.mapi view_parent m.parents)])]);
-        [view_st m.st]
-      ];
-    ] in
-    div @@ List.flatten [v_actions; v_lm]
+      if m.parents=[] then []
+       else [
+         details ~short:(Printf.sprintf "previous (%d)" (List.length m.parents))
+           (div_class "ats-parents" @@ List.mapi view_parent m.parents)]
+    in
+    div @@ List.flatten [
+      [h2 name];
+      v_actions_pre;
+      [C.view m.st];
+      v_actions_post;
+      v_parents]
 
   let update (m:model) (msg:msg) : _ result =
     let {parents; st; step } = m in
@@ -126,6 +124,14 @@ module CDCL
           Ok (mk_ (st::parents) st') (* make a choice *)
         | Ats.ATS.Choice _ -> assert false
       end
+    | M_pick i ->
+      begin match step with
+        | Ats.ATS.Choice l ->
+          begin try Ok (mk_ (st::parents) (fst @@ List.nth l i))
+            with _ -> Error "invalid `pick`"
+          end
+        | _ -> Error "cannot pick a state, not in a choice state"
+      end
     | M_go_back i ->
       begin try
           let st = List.nth parents i in
@@ -134,12 +140,30 @@ module CDCL
       end
 end
 
+module CDCL = Make_calculus(struct
+    module A = Ats.ATS.Make(Ats.CDCL.A)
+    open Ats.CDCL
+    open Calculus_msg
+
+    let view (st:State.t) : Calculus_msg.t Vdom.vdom =
+      let open Vdom in
+      let status, trail, cs = State.view st in
+      div_class "ats-state" [
+        pre (Fmt.sprintf "status: %a" State.pp_status status);
+        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail)) (
+          Trail.to_iter trail
+          |> Iter.map
+            (fun elt -> pre (Fmt.to_string Trail.pp_trail_elt elt))
+          |> Iter.to_list |> div_class "ats-trail"
+        );
+        details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs)) (
+          List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses"
+        );
+      ]
+  end)
+
 (* TODO
-module MCSAT = struct
-  module A = Ats.ATS.Make(Ats.MCSAT.A)
-  let view (_st:A.State.t) =
-  assert false
-  end
+module MCSAT = Make_calculus(Ats.ATS.Make(Ats.MCSAT.A))
    *)
 
 module App = struct
@@ -149,10 +173,13 @@ module App = struct
     | M_load of string
     | M_set_parse of string
     | M_parse
-    | M_cdcl of CDCL.msg
+    | M_calculus of Calculus_msg.t
 
   type logic_model =
-    | LM_cdcl of CDCL.model
+    | LM : {
+        app: (module APP_CALCULUS with type model = 'm);
+        model: 'm;
+      } -> logic_model
       
   type model = {
     error: string option;
@@ -163,7 +190,7 @@ module App = struct
   let all = ["cdcl"; "mcsat"]
   let init_ s : logic_model =
     match s with
-    | "cdcl" -> LM_cdcl CDCL.init
+    | "cdcl" -> LM { app=(module CDCL); model=CDCL.init; }
     | "mcsat" ->
       assert false (* TODO *)
     | s -> failwith @@ "unknown system " ^ s
@@ -178,16 +205,17 @@ module App = struct
     | M_set_parse s, _ -> {m with parse=s}
     | M_parse, {parse=s; lm; _} ->
       let lm' = match lm with
-        | LM_cdcl _ -> CDCL.parse s |> CCResult.map (fun m -> LM_cdcl m)
+        | LM {app=(module App) as app; _} ->
+          App.parse s |> CCResult.map (fun m -> LM {app; model=m})
       in
       begin match lm' with
         | Ok lm' -> {m with error=None; lm=lm'}
         | Error msg ->
           {m with error=Some msg}
       end
-    | M_cdcl msg, {lm=LM_cdcl u;_} ->
-      begin match CDCL.update u msg with
-        | Ok lm -> {m with error=None; lm=LM_cdcl lm}
+    | M_calculus msg, {lm=LM {app=(module App) as app; model};_} ->
+      begin match App.update model msg with
+        | Ok lm -> {m with error=None; lm=LM {app; model=lm}}
         | Error msg -> {m with error=Some msg}
       end
       (* TODO
@@ -209,8 +237,8 @@ module App = struct
       ]
     ]
     and v_lm = match lm with
-      | LM_cdcl m ->
-        [CDCL.view m |> map (fun x -> M_cdcl x)]
+      | LM {app=(module App); model} ->
+        [App.view model |> map (fun x -> M_calculus x)]
     in
     div @@ List.flatten [v_error; v_load; v_parse; v_lm]
 

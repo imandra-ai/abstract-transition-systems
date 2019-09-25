@@ -8,6 +8,13 @@
   justify-content: space-between;
 }
 
+.ats-parent {
+  display: flex;
+  flex-flow: row wrap;
+  align-items: 0;
+  justify-content: start;
+}
+
 .ats-state {
   display: flex;
   flex-flow: column wrap;
@@ -29,7 +36,14 @@
   justify-content: normal;
 }
 
-.ats-trail li {
+.ats-choice {
+  display: flex;
+  flex-flow: row wrap;
+  justify-content: start;
+  outline: green 2em;
+}
+
+.ats-trail > li {
   list-style: none;
 }
 
