@@ -28,6 +28,11 @@
   box-shadow: 3px 3px 4px black;
 }
 
+.ats-expl {
+  box-shadow: 3px 3px 2px gold;
+  padding: 3px;
+}
+
 .ats-parent > * {
   padding: 1px;
   margin-left: 5px;

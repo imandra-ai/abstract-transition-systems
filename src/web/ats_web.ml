@@ -2,18 +2,20 @@ module Fmt = CCFormat
 
 module Vdom = struct
   include Vdom
-  let h2 x = elt "h2" [text x]
-  let h3 x = elt "h3" [text x]
-  let h4 x = elt "h4" [text x]
-  let h5 x = elt "h5" [text x]
-  let pre x = elt "pre" [text x]
-  let pre_f fmt = Fmt.ksprintf ~f:pre fmt
-  let ul l = elt "ul" @@ List.map (fun x -> elt "li" [x]) l
-  let button txt msg = input [] ~a:[onclick (fun _ -> msg); type_button; value txt]
-  let div_class c x = elt "div" ~a:[class_ c] x
+  let h2 ?a x = elt ?a "h2" [text x]
+  let h3 ?a x = elt ?a "h3" [text x]
+  let h4 ?a x = elt ?a "h4" [text x]
+  let h5 ?a x = elt ?a "h5" [text x]
+  let pre ?a x = elt ?a "pre" [text x]
+  let pre_f ?a fmt = Fmt.ksprintf ~f:(pre ?a) fmt
+  let ul ?a l = elt ?a "ul" @@ List.map (fun x -> elt "li" [x]) l
+  let bold x = elt "bold" [x]
+  let button ?(a=[]) txt msg =
+    input [] ~a:(onclick (fun _ -> msg) :: type_button :: value txt :: a)
+  let div_class ?(a=[]) c x = elt "div" ~a:(class_ c::a) x
   let color s = style "color" s
   let text_f fmt = Fmt.ksprintf ~f:text fmt
-  let button_f act fmt = Fmt.ksprintf ~f:(fun x -> button x act) fmt
+  let button_f ?a act fmt = Fmt.ksprintf ~f:(fun x -> button ?a x act) fmt
 
   let details ?(a=[]) ?(open_=false) ?short x =
     let open Vdom in
@@ -82,7 +84,7 @@ module Make_calculus(C : CALCULUS)
     let v_actions_pre, v_actions_post = match m.step with
       | Ats.ATS.Done | Ats.ATS.Error _ -> [], []
       | Ats.ATS.One (_,expl) ->
-        [button "step" M_step; div [button "next" M_next; text_f "(by: %s)" expl]], []
+        [button "step" M_step; button ~a:[str_prop "title" expl] "next" M_next], []
       | Ats.ATS.Choice l ->
         let choices =
           List.mapi
@@ -94,17 +96,19 @@ module Make_calculus(C : CALCULUS)
         [button "step" M_step], [h2 "choices:"; div_class "ats-choices" choices]
     and v_parents =
       let n = List.length m.parents in
-      let view_parent i (st,expl) =
+      let view_parent i (st,expl) = [
+        div_class "ats-expl" [pre_f "→ %s" expl];
         div_class "ats-parent" [
           div ~key:(Printf.sprintf "parent-%d" (n-i)) [C.view st];
           button "go back" (M_go_back i);
-          text_f "(next: %s)" expl;
-        ]
+        ];
+      ]
       in
       if n=0 then []
        else [
          details ~open_:true ~short:(Printf.sprintf "previous (%d)" n)
-           (div_class "ats-parents" @@ List.mapi view_parent m.parents)]
+           (div_class "ats-parents"
+            @@ List.flatten @@ List.mapi view_parent m.parents)]
     in
     div @@ List.flatten [
       [h2 name];
@@ -196,9 +200,17 @@ module MCSAT = Make_calculus(struct
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
       let status, cs, trail, env = State.view st in
+      let a_status = match status with
+        | Sat -> [color "green"; style "bold" "true"]
+        | Unsat -> [color "red"; style "bold" "true"]
+        | Conflict_uf _ | Conflict_bool _ -> [color "orange"]
+        | Searching -> []
+      in
       div_class "ats-state" [
-        div_class "ats-status" [h5 "status: "; pre (Fmt.to_string State.pp_status status)];
-        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
+        div_class "ats-status"
+          [h5 ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
+        details
+          ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
           ~a:[str_prop "title" (Fmt.sprintf "@[<v>%a@]@." Trail.pp trail)]
           (Trail.to_iter trail
           |> Iter.map (fun elt -> pre_f "%a" Trail.pp_trail_elt elt)
@@ -210,6 +222,7 @@ module MCSAT = Make_calculus(struct
            |> div_class "ats-clauses"
         );
         details ~short:(Fmt.sprintf "env (%d)" (Env.length env))
+          ~a:[str_prop "title" (Fmt.sprintf "%a@." Env.pp env)]
           (Env.to_iter env
            |> Iter.map (fun c -> pre_f "%a" Env.pp_item c) |> Iter.to_list
            |> div_class "ats-clauses"
@@ -258,8 +271,11 @@ module App = struct
       end
     | M_set_parse s, _ -> {m with parse=s}
     | M_set_auto s, _ ->
-      (try {m with auto=int_of_string s}
-       with _ -> {m with error=Some "auto should be an integer"})
+      if String.trim s = "" then {m with auto=0}
+      else (
+        try {m with auto=int_of_string s}
+        with _ -> {m with error=Some "auto should be an integer"}
+      )
     | M_parse, {parse=s; lm; _} ->
       let lm' = match lm with
         | LM {app=(module App) as app; _} ->
@@ -288,7 +304,8 @@ module App = struct
     and v_load_parse_example = [
       List.map
         (fun (name,s) ->
-           button_f (M_and_then (M_set_parse s, M_parse)) "load %S" name)
+           button_f ~a:[str_prop "title" s]
+             (M_and_then (M_set_parse s, M_parse)) "load %S" name)
         Ats_examples.all
       |> div_class "ats-parse-examples"
     ]
