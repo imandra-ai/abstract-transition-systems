@@ -1,0 +1,3 @@
+[submodule "vendor/ocaml-vdom"]
+	path = vendor/ocaml-vdom
+	url = https://github.com/LexiFi/ocaml-vdom
