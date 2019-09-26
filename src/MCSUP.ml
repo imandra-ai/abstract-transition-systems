@@ -713,12 +713,13 @@ module Clause = struct
 end
 
 module Trail : sig
-  type kind = Decision | BCP of Clause.t | Eval
+  type kind = Decision | BCP of Clause.t | Eval | Paramod of Term.t
   type op = Assignment.op
   type t
 
   val pp : t Fmt.printer
   val pp_trail_elt : (kind * int * op) Fmt.printer
+  val pp_kind : kind Fmt.printer
 
   val env : t -> Env.t
   val pop : t -> (kind * op * t) option
@@ -736,7 +737,7 @@ module Trail : sig
   val iter_terms : t -> Term.t Iter.t
   val iter_ops : t -> Op.t Iter.t
 end = struct
-  type kind = Decision | BCP of Clause.t | Eval
+  type kind = Decision | BCP of Clause.t | Eval | Paramod of Term.t
   type op = Assignment.op =
     | Rewrite of { l: Term.t; r: Term.t; }
     | Assign of { t: Term.t; value: Value.t; }
@@ -774,7 +775,7 @@ end = struct
     let env = next.env in
     let level = match kind with
       | Decision -> 1 + level next
-      | BCP _ | Eval -> level next
+      | BCP _ | Paramod _ | Eval -> level next
     and _assign = lazy (
       let a = assign next in
       Assignment.add_op op a
@@ -823,8 +824,15 @@ end = struct
   let length tr = to_iter tr |> Iter.length
 
   let pp_trail_elt out (k,level,op) =
-    let cause = match k with Decision -> "*" | BCP _ -> "" | Eval -> "$" in
+    let cause = match k with
+      | Decision -> "*" | BCP _ -> "" | Eval -> "$" | Paramod _ -> "=" in
     Fmt.fprintf out "@[<h>[%d%s]%a@]" level cause Op.pp op
+
+  let pp_kind out = function
+    | Decision -> Fmt.string out "decision"
+    | Eval -> Fmt.string out "eval"
+    | BCP c -> Fmt.fprintf out "(@[bcp@ %a@])" Clause.pp c
+    | Paramod c -> Fmt.fprintf out "(@[paramod@ %a@])" Term.pp c
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[<v>%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -1060,6 +1068,11 @@ module State = struct
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
           Some (One (make self.env self.cs next self.status, expl))
         | Some (Decision, Op.Rewrite _, _) -> assert false
+        | Some (Paramod c, op, next) ->
+          (* TODO: propagation/superposotion *)
+          let expl = Fmt.sprintf "consume-paramod %a@ :eqn %a"
+              Term.pp (Op.lhs op) Term.pp c in
+          Some (One (make self.env self.cs next self.status, expl))
         | Some (Decision, Op.Assign {t=lit;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
@@ -1150,8 +1163,7 @@ module State = struct
                 (* TODO: add [b= norm(a)] ? *)
                 None (* already assigned *)
               ) else (
-                (* FIXME: remove Eval and use a custom kind *)
-                let trail = Trail.cons_rw Trail.Eval a b self.trail in
+                let trail = Trail.cons_rw (Trail.Paramod t) a b self.trail in
                 let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
                 Some (ATS.One (make self.env self.cs trail Searching, expl))
               )

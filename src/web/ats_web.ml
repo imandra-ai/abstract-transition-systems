@@ -19,10 +19,10 @@ module Vdom = struct
   let title s = str_prop "title" s
   let title_f fmt = Fmt.ksprintf ~f:title fmt
 
-  let details ?(a=[]) ?(open_=false) ?short x =
+  let details ?a ?(open_=false) ?short x =
     let open Vdom in
-    let l = match short with None -> [x] | Some s -> [elt "summary" [text s]; x] in
-    let a = if open_ then str_prop "open" "true"::a else a in
+    let l = match short with None -> [x] | Some s -> [elt ?a "summary" [text s]; x] in
+    let a = if open_ then [str_prop "open" "true"] else [] in
     elt ~a "details" l
 end
 
@@ -279,8 +279,11 @@ module MCSUP = Make_calculus(struct
           ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
-          |> Iter.map (fun elt -> pre_f "%a" Trail.pp_trail_elt elt)
-          |> Iter.to_list |> div_class "ats-trail"
+           |> Iter.map
+             (fun ((k,_,_) as elt) ->
+                pre_f ~a:[title_f "%a" Trail.pp_kind k]
+                 "%a" Trail.pp_trail_elt elt)
+           |> Iter.to_list |> div_class "ats-trail"
         );
         details ~short:(Fmt.sprintf "clauses (%d)" (Clause.Set.cardinal cs))
           ~a:[title_f "@[<v>%a@]@." (Clause.Set.pp Clause.pp) cs]
