@@ -241,7 +241,7 @@ module Env = struct
     | Fun v -> Fmt.fprintf out "(@[<2>fun@ %a@ %a@])" Var.pp v Ty.pp (Var.ty v)
 
   let pp out (self:t) =
-    Fmt.fprintf out "(@[%a@])" (Util.pp_iter pp_item) (to_iter self)
+    Fmt.fprintf out "(@[<hv>%a@])" (Util.pp_iter pp_item) (to_iter self)
 end
 
 (** {2 Terms} *)
@@ -435,9 +435,9 @@ type assignment = Value.t Term.Map.t
 module Clause = struct
   type t = Term.Set.t
   let pp out c =
-    if Term.Set.cardinal c = 1
-    then Term.pp out (Term.Set.choose c)
-    else Fmt.fprintf out "(@[or@ %a@])" (pp_list Term.pp) (Term.Set.to_list c)
+    if Term.Set.is_empty c then Fmt.string out "⊥"
+    else if Term.Set.cardinal c = 1 then Term.pp out (Term.Set.choose c)
+    else Fmt.fprintf out "(@[<hv>or@ %a@])" (pp_list Term.pp) (Term.Set.to_list c)
   let is_empty = Term.Set.is_empty
   let choose = Term.Set.choose
   let contains l c = Term.Set.mem l c
@@ -702,7 +702,7 @@ module State = struct
         Term.pp t Value.pp v Term.pp lit_force Term.pp lit_forbid
     | CUF_forced2 {t;v1;v2;lit_v1;lit_v2} ->
       Fmt.fprintf out
-        "(@[conflict-uf-forced2@ %a @[<- %a@ :by %a@]@ :or @[<- %a@ :by %a@]@])"
+        "(@[conflict-uf-forced2 `@[%a@]`@ (@[<- %a@ :by %a@])@ :or (@[<- %a@ :by %a@])@])"
         Term.pp t Value.pp v1 Term.pp lit_v1 Value.pp v2 Term.pp lit_v2
     | CUF_congruence {f;t1;t2} ->
       Fmt.fprintf out
@@ -765,42 +765,46 @@ module State = struct
           (* resolution *)
           assert (Clause.contains (Term.not_ lit) d);
           let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
-          let expl = Fmt.sprintf "resolve on ¬%a with %a" Term.pp lit Clause.pp d in
+          let expl = Fmt.sprintf "resolve on `@[¬%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
         | Trail.Cons {kind=BCP d;lit;next;_} when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
-          let expl = Fmt.sprintf "resolve on %a with %a" Term.pp lit Clause.pp d in
+          let expl = Fmt.sprintf "resolve on `@[%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
-        | Trail.Cons {kind=BCP _; next; _} ->
-          Some (One (make self.env self.cs next self.status, "consume"))
+        | Trail.Cons {kind=BCP _; lit; next; _} ->
+          let expl = Fmt.sprintf "consume-bcp %a" Term.pp lit in
+          Some (One (make self.env self.cs next self.status, expl))
         | Trail.Cons {kind=Eval; lit; next; _} ->
-          Some (One (make self.env self.cs next self.status, Fmt.sprintf "consume-eval %a" Term.pp lit))
-        | Trail.Cons {kind=Decision; next; _ } ->
+          let expl = Fmt.sprintf "consume-eval %a" Term.pp lit in
+          Some (One (make self.env self.cs next self.status, expl))
+        | Trail.Cons {kind=Decision; next; lit; _ } ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
-            let expl = "T-consume" in
+            let expl = Fmt.sprintf "T-consume %a" Term.pp lit in
             Some (One (make self.env self.cs next (Conflict_bool c), expl))
           ) else if Clause.length c_reduced=1 then (
             (* normal backjump *)
-            let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
+            let expl = Fmt.sprintf "backjump with learnt clause %a" Clause.pp c in
             Some (One (make self.env (Clause.Set.add c self.cs) next Searching, expl))
           ) else if Clause.length c_reduced=2 then (
             (* semantic case split? *)
             let decision = Clause.choose c_reduced in
             let expl =
-              Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
+              Fmt.sprintf "backjump+semantic split with learnt clause %a@ @[<2>decide %a@ in %a@]"
                 Clause.pp c Term.pp decision Clause.pp c_reduced
             in
             let trail = Trail.cons Trail.Decision decision Value.true_ next in
             Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
           ) else (
-            Util.errorf
-              "backjump with clause %a@ but filter-false %a@ \
-               should have at most 2 lits"
-              Clause.pp c Clause.pp c_reduced
+            Some
+              (Error
+                 (Fmt.sprintf "backjump with clause %a@ but filter-false %a@ \
+                               should have at most 2 lits"
+                    Clause.pp c Clause.pp
+                     c_reduced))
           )
       end
     | _ -> None
@@ -819,7 +823,7 @@ module State = struct
   let propagate self : _ ATS.step option =
     match find_unit_c self with
     | Some (c,lit) ->
-      let expl = Fmt.sprintf "propagate %a from %a" Term.pp lit Clause.pp c in
+      let expl = Fmt.sprintf "@[<2>propagate %a@ from %a@]" Term.pp lit Clause.pp c in
       let trail = Trail.cons (BCP c) lit Value.true_ self.trail in
       Some (ATS.One (make self.env self.cs trail Searching, expl))
     | None -> None
