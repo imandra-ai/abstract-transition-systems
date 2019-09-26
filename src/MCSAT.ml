@@ -590,7 +590,6 @@ module State = struct
     | Unsat
     | Conflict_bool of Clause.t
     | Conflict_uf of conflict_uf
-    | Backjump of Clause.t
     | Searching
 
   type uf_domain =
@@ -716,7 +715,6 @@ module State = struct
     | Searching -> Fmt.string out "searching"
     | Conflict_bool c -> Fmt.fprintf out "(@[conflict %a@])" Clause.pp c
     | Conflict_uf cuf -> pp_conflict_uf out cuf
-    | Backjump c -> Fmt.fprintf out "(@[backjump %a@])" Clause.pp c
 
   let pp out (self:t) : unit =
     Fmt.fprintf out
@@ -762,8 +760,13 @@ module State = struct
       Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
     | Conflict_bool c ->
       begin match self.trail with
-        | Trail.Nil ->
-          Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
+        | Trail.Nil -> Some (Error "empty trail") (* should not happen *)
+        | Trail.Cons {kind=BCP d;lit;value=Value.Bool false; next;_} ->
+          (* resolution *)
+          assert (Clause.contains (Term.not_ lit) d);
+          let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
+          let expl = Fmt.sprintf "resolve on ¬%a with %a" Term.pp lit Clause.pp d in
+          Some (One (make self.env self.cs next (Conflict_bool res), expl))
         | Trail.Cons {kind=BCP d;lit;next;_} when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
@@ -774,63 +777,32 @@ module State = struct
           Some (One (make self.env self.cs next self.status, "consume"))
         | Trail.Cons {kind=Eval; lit; next; _} ->
           Some (One (make self.env self.cs next self.status, Fmt.sprintf "consume-eval %a" Term.pp lit))
-        | Trail.Cons {kind=Decision; _} ->
-          (* start backjumping *)
-          Some (One (make self.env self.cs self.trail (Backjump c), "backjump below conflict level"))
+        | Trail.Cons {kind=Decision; next; _ } ->
+          (* decision *)
+          let c_reduced = Clause.filter_false (Trail.assign next) c in
+          if Clause.is_empty c_reduced then (
+            let expl = "T-consume" in
+            Some (One (make self.env self.cs next (Conflict_bool c), expl))
+          ) else if Clause.length c_reduced=1 then (
+            (* normal backjump *)
+            let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
+            Some (One (make self.env (Clause.Set.add c self.cs) next Searching, expl))
+          ) else if Clause.length c_reduced=2 then (
+            (* semantic case split? *)
+            let decision = Clause.choose c_reduced in
+            let expl =
+              Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
+                Clause.pp c Term.pp decision Clause.pp c_reduced
+            in
+            let trail = Trail.cons Trail.Decision decision Value.true_ next in
+            Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
+          ) else (
+            Util.errorf
+              "backjump with clause %a@ but filter-false %a@ \
+               should have at most 2 lits"
+              Clause.pp c Clause.pp c_reduced
+          )
       end
-    | _ -> None
-
-  let backjump_ (self:t) : _ ATS.step option =
-    let open ATS in
-    let rec unwind_till_next_decision = function
-      | Trail.Nil -> Trail.empty
-      | Trail.Cons {kind=Decision; next; _} -> next
-      | Trail.Cons {kind=BCP _ | Eval;next; _} -> unwind_till_next_decision next
-    in
-    let trail = self.trail in
-    match self.status, trail with
-    | Backjump c, _ when Clause.is_empty c ->
-      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
-    | Backjump c, Trail.Nil ->
-      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
-    | Backjump c, _ when Trail.level trail = 0 ->
-      Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "level 0 trail")) (* unsat! *)
-    | Backjump c, Trail.Cons {lit; kind; next; _ } when not (Term.is_bool lit) ->
-      assert (kind=Decision);
-      let c_reduced = Clause.filter_false (Trail.assign next) c in
-      if Clause.is_empty c_reduced then (
-        let expl = "T-consume" in
-        Some (One (make self.env self.cs next (Backjump c), expl))
-      ) else if Clause.length c_reduced=1 then (
-        (* normal backjump *)
-        let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-        Some (One (make self.env (Clause.Set.add c self.cs) next Searching, expl))
-      ) else if Clause.length c_reduced=2 then (
-        (* semantic case split? *)
-        let decision = Clause.choose c_reduced in
-        let expl =
-          Fmt.sprintf "backjump+semantic split with %a@ @[<2>decide %a@ in %a@]"
-            Clause.pp c Term.pp decision Clause.pp c_reduced
-        in
-        let trail = Trail.cons Trail.Decision decision Value.true_ next in
-        Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
-      ) else (
-        Util.errorf
-          "backjump with clause %a@ but filter-false %a@ \
-           should have at most 2 lits"
-          Clause.pp c Clause.pp c_reduced
-      )
-    | Backjump c, Trail.Cons {lit; _}
-      when Clause.contains (Term.not_ lit) c
-        && Clause.eval_to_false
-             (Trail.assign trail) (Clause.remove (Term.not_ lit) c) ->
-      (* reached UIP *)
-      let tr = unwind_till_next_decision trail in
-      let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
-      let trail = Trail.cons (BCP c) lit Value.false_ tr in
-      Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
-    | Backjump c, Trail.Cons {next;_} ->
-      Some (One (make self.env (Clause.Set.add c self.cs) next (Backjump c), "consume"))
     | _ -> None
 
   let find_unit_c (self:t) : (Clause.t * Term.t) option =
@@ -1036,7 +1008,7 @@ module State = struct
   (* learn some UF lemma and then do resolution on it *)
   let solve_uf_domain_conflict (self:t) : _ option =
     match self.status with
-    | Searching | Sat | Unsat | Backjump _ | Conflict_bool _ -> None
+    | Searching | Sat | Unsat | Conflict_bool _ -> None
     | Conflict_uf cuf ->
       (* learn a UF lemma *)
       let lemma = mk_uf_lemma self cuf in
@@ -1059,7 +1031,7 @@ module State = struct
 
   let rules : _ ATS.rule list list = [
     [is_done];
-    [resolve_bool_conflict_; solve_uf_domain_conflict; backjump_];
+    [resolve_bool_conflict_; solve_uf_domain_conflict;];
     [if_searching find_false_clause;
      if_searching find_uf_domain_conflict;
      if_searching find_congruence_conflict;
