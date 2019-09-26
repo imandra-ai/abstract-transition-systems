@@ -880,7 +880,7 @@ module State = struct
     let vars = to_decide self in
     if Term.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.Done (make self.env self.cs self.trail Sat, "all vars decided"))
+      Some (ATS.One (make self.env self.cs self.trail Sat, "all vars decided"))
     ) else (
       (* multiple possible decisions *)
       let decs =
@@ -1054,7 +1054,7 @@ module State = struct
 
   let is_done (self:t) =
     match self.status with
-    | Sat | Unsat -> Some (ATS.Done (self, "done"))
+    | Sat | Unsat -> Some ATS.Done
     | _ -> None
 
   let rules : _ ATS.rule list list = [

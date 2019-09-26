@@ -67,7 +67,7 @@ module Make_calculus(C : CALCULUS)
 
   let init =
     let st = State.empty in
-    { st; parents=[]; step=Ats.ATS.Done (st, ""); }
+    { st; parents=[]; step=Ats.ATS.Done; }
 
   let mk_ parents st =
     { st; parents; step=next st; }
@@ -80,8 +80,7 @@ module Make_calculus(C : CALCULUS)
   let view (m: model) : _ Vdom.vdom =
     let open Vdom in
     let v_actions_pre, v_actions_post = match m.step with
-      | Ats.ATS.Done _ | Ats.ATS.Error _ ->
-        [button "step" M_step; button "next" M_next], []
+      | Ats.ATS.Done | Ats.ATS.Error _ -> [], []
       | Ats.ATS.One (_,expl) ->
         [button "step" M_step; div [button "next" M_next; text_f "(by: %s)" expl]], []
       | Ats.ATS.Choice l ->
@@ -118,15 +117,18 @@ module Make_calculus(C : CALCULUS)
   let do_step m =
     let {parents; st; step } = m in
     match step with
-    | Ats.ATS.Done (st',_) -> Ok (mk_ parents st')
+    | Ats.ATS.Done -> Error "done"
     | Ats.ATS.Error msg -> Error msg
     | Ats.ATS.One (st',expl) | Ats.ATS.Choice ((st',expl)::_) ->
       Ok (mk_ ((st,expl)::parents) st') (* make a choice *)
     | Ats.ATS.Choice _ -> assert false
 
   let rec do_auto n m =
-    if n=0 then Ok m
-    else match do_step m with
+    match m.step with
+    | Done -> Ok m
+    | _ when n <= 0 -> Ok m
+    | _ ->
+      match do_step m with
       | Error e -> Error e
       | Ok m' -> do_auto (n-1) m'
 
@@ -135,10 +137,8 @@ module Make_calculus(C : CALCULUS)
     match msg with
     | M_next ->
       begin match step with
-        | Ats.ATS.Done (st',_) ->
-          Ok (mk_ parents st') (* just go to [st'] *)
-        | Ats.ATS.Error msg ->
-          Error msg
+        | Ats.ATS.Done  -> Error "done"
+        | Ats.ATS.Error msg -> Error msg
         | Ats.ATS.One (st',expl) | Ats.ATS.Choice [st',expl] ->
           Ok (mk_ ((st,expl)::parents) st')
         | Ats.ATS.Choice _ ->

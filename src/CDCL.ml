@@ -197,7 +197,7 @@ module State = struct
     let lazy vars = self._to_decide in
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.Done (make self.cs self.trail Sat, "all vars decided"))
+      Some (ATS.One (make self.cs self.trail Sat, "all vars decided"))
     ) else (
       (* multiple possible decisions *)
       let decs =
@@ -223,7 +223,7 @@ module State = struct
 
   let is_done (self:t) =
     match self.status with
-    | Sat | Unsat -> Some (ATS.Done (self, "done"))
+    | Sat | Unsat -> Some ATS.Done
     | _ -> None
 
   let rules : _ ATS.rule list list = [

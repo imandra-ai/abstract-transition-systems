@@ -120,9 +120,7 @@ module Make(A: ATS.S) = struct
 
   let call_next_once_ st : unit =
     match A.next st.cur_st with
-    | ATS.Done (st', expl) ->
-      st.trace <- Transition.make_deter st.cur_st st' expl :: st.trace;
-      st.cur_st <- st';
+    | ATS.Done ->
       st.status <- Trace.Stopped;
     | ATS.Error msg ->
       st.status <- Trace.Error msg;

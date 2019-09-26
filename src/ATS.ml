@@ -3,7 +3,7 @@
 open Util
 
 type 'a step =
-  | Done of 'a (* final state *)
+  | Done
   | Error of string
   | One of 'a (* forced transition *)
   | Choice of 'a list
@@ -43,8 +43,8 @@ module Make(B : BASIC)
     match s1, s2 with
     | Error _, _ -> s1
     | _, Error _ -> s2
-    | Done _, _ -> s1
-    | _, Done _ -> s2
+    | Done, _ -> s1
+    | _, Done -> s2
     | One a, One b -> Choice [a;b]
     | One a, Choice l -> Choice (a::l)
     | Choice l, One a -> Choice (a::l)
