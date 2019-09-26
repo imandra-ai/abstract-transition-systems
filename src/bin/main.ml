@@ -9,7 +9,7 @@ let ats_l : ATS.t list = [
   MCSUP.ats;
 ]
 
-let default_ats = CDCL.ats
+let default_ats = MCSUP.ats
 
 module Make_cmd(A: ATS.S) = struct
   type t =

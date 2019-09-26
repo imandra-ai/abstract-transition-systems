@@ -1,5 +1,9 @@
 /* basic styling */
 
+.body {
+  font-family: sans-serif;
+}
+
 .ats {
   max-width: 800px;
 }

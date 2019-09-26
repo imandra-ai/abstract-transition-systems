@@ -160,7 +160,7 @@ module Value : sig
   val unin_var : Var.t -> t
   val unin : Ty.t -> int -> t (* from counter + type *)
 end = struct
-  type t =  Bool of bool | Unin of Var.t
+  type t = Bool of bool | Unin of Var.t
 
   let ty = function Bool _ -> Ty.bool | Unin v -> Var.ty v
   let pp out = function
@@ -443,18 +443,20 @@ end
 (** Precedence on symbols *)
 module Precedence : sig
   type t
-  val empty : t
   val compare : t -> Var.t -> Var.t -> int
 
   val to_iter : t -> Var.t Iter.t
   val to_list : t -> Var.t list
   val pp : t Fmt.printer
   val to_string : t -> string
+  val length : t -> int
 
   val complete : Var.t list -> Var.env -> t
   (** [complete l1 env] makes a precedence where elements of [l1] are
       the smallest ones (in that order), and remaining elements of [env] are bigger
       than elements of [l1] but in some unspecified order. *)
+
+  val empty : Var.env -> t
 end = struct
   type t = {
     l: Var.t list;
@@ -467,13 +469,12 @@ end = struct
       ) in
     {l; m}
 
-  let empty : t = mk_ []
-
   let to_list self = self.l
   let to_iter self = CCList.to_seq self.l
+  let length self = List.length self.l
 
   let pp out (self:t) =
-    Fmt.fprintf out "(@[%a@])" (Util.pp_iter ~sep:"<" Var.pp) (to_iter self)
+    Fmt.fprintf out "(@[%a@])" (Util.pp_iter ~sep:" <" Var.pp) (to_iter self)
   let to_string = Fmt.to_string pp
 
   let compare (self:t) v1 v2 : int =
@@ -489,6 +490,8 @@ end = struct
     in
     let l = l1 @ l2 in
     mk_ l
+
+  let empty env : t = complete [] env
 end
 
 module KBO : sig
@@ -562,6 +565,8 @@ module Assignment : sig
     | Assign of {t: Term.t; value: Value.t; } 
 
   val normalize : t -> Term.t -> Term.t
+  val does_normalize : t -> Term.t -> bool
+
   val evaluate : t -> Term.t -> Value.t option
   val evaluate_exn : t -> Term.t -> Value.t
   val does_evaluate : t -> Term.t -> bool
@@ -618,9 +623,14 @@ end = struct
   let rec normalize (self:t) (t:Term.t) =
     match TM.find t self.rw with
     | exception Not_found -> t
-    | u -> normalize self u
+    | u -> 
+      Fmt.printf "normalize %a into %a@." Term.pp t Term.pp u;
+      normalize self u
+
+  let does_normalize self t : bool = TM.mem t self.rw
 
   let evaluate (self:t) (t:Term.t) : _ option =
+    Fmt.printf "evaluate %a in %a@." Term.pp t pp self;
     let t = normalize self t in
     TM.get t self.assign
 
@@ -702,37 +712,66 @@ module Clause = struct
   module Set = CCSet.Make(struct type nonrec t = t let compare=compare end)
 end
 
-module Trail = struct
+module Trail : sig
+  type kind = Decision | BCP of Clause.t | Eval
+  type op = Assignment.op
+  type t
+
+  val pp : t Fmt.printer
+  val pp_trail_elt : (kind * int * op) Fmt.printer
+
+  val env : t -> Env.t
+  val pop : t -> (kind * op * t) option
+  val prec : t -> Precedence.t
+  val assign : t -> Assignment.t
+  val assigned_vars : t -> Var.t list
+  val length : t -> int
+
+  val empty : Env.t -> t
+  val level : t -> int
+  val cons : kind -> op -> t -> t
+  val cons_assign : kind -> Term.t -> Value.t -> t -> t
+  val cons_rw : kind -> Term.t -> Term.t -> t -> t
+  val to_iter : t -> (kind * int * op) Iter.t
+  val iter_terms : t -> Term.t Iter.t
+  val iter_ops : t -> Op.t Iter.t
+end = struct
   type kind = Decision | BCP of Clause.t | Eval
   type op = Assignment.op =
     | Rewrite of { l: Term.t; r: Term.t; }
     | Assign of { t: Term.t; value: Value.t; }
-  type t =
+  type t = {
+    env: Env.t;
+    stack: stack;
+    _assign: Assignment.t lazy_t; (* assignment from this trail *)
+    _prec: Precedence.t lazy_t;
+    _assigned_vars: Var.t list; (* subset of unit variables assigned so far, top to bottom *)
+  }
+  and stack =
     | Nil
     | Cons of {
         kind: kind;
         op: op;
         next: t;
         level: int;
-        _assign: Assignment.t lazy_t; (* assignment from this trail *)
-        _prec: Precedence.t lazy_t;
-        _assigned_vars: Var.t list; (* subset of unit variables assigned so far, top to bottom *)
       }
 
-  let[@inline] assign = function
-    | Nil -> Assignment.empty
-    | Cons {_assign=lazy a;_} -> a
 
-  let[@inline] level = function
+  let env self = self.env
+  let pop self = match self.stack with
+    | Nil -> None
+    | Cons {kind; op; next; _} -> Some (kind, op, next)
+
+  let[@inline] prec (self:t) = Lazy.force self._prec
+  let[@inline] assign self = Lazy.force self._assign
+  let[@inline] assigned_vars self = self._assigned_vars
+  let[@inline] level self = match self.stack with
     | Nil -> 0
     | Cons {level=l;_} -> l
 
-  let assigned_vars = function
-    | Nil -> []
-    | Cons {_assigned_vars=a; _} -> a
-
-  let cons ~env kind (op:op) (next:t) : t =
+  let cons kind (op:op) (next:t) : t =
     (* Format.printf "trail.cons %a <- %a@." Term.pp lit Value.pp value; *)
+    let env = next.env in
     let level = match kind with
       | Decision -> 1 + level next
       | BCP _ | Eval -> level next
@@ -742,27 +781,36 @@ module Trail = struct
     )
     and _assigned_vars =
       let l = assigned_vars next in
-      match Term.view (Op.lhs op) with
-        | App (f, []) -> f :: l
-        | _ -> l
+      match op with
+      | Op.Rewrite _ -> l
+      | Op.Assign {t;_} ->
+        match Term.view t with
+          | App (f, []) -> f :: l
+          | _ -> l
     in
     let _prec = lazy (
       Precedence.complete (List.rev _assigned_vars) env.Env.vars
     ) in
-    Cons { kind; op; next; _assign; _prec; level; _assigned_vars; }
+    {env; _assign; _prec; _assigned_vars; stack=Cons { kind; op; next; level; }}
 
-  let cons_assign ~env kind (t:Term.t) (value:Value.t) next : t =
+  let cons_assign kind (t:Term.t) (value:Value.t) next : t =
     let t, value =
       if Term.sign t then t, value else Term.not_ t, Value.not_ value in
-    cons ~env kind (Assign {t; value}) next
+    cons kind (Assign {t; value}) next
 
-  let cons_rw ~env kind (l:Term.t) (r:Term.t) next : t =
-    cons ~env kind (Rewrite {l;r}) next
+  let cons_rw kind (l:Term.t) (r:Term.t) next : t =
+    cons kind (Rewrite {l;r}) next
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
-  let empty = cons_assign (BCP unit_true) Term.true_ Value.true_ Nil
+  let empty env =
+    let e = {
+      env; stack=Nil; _assigned_vars=[];
+      _prec=lazy(Precedence.empty env.Env.vars);
+      _assign=lazy Assignment.empty;
+    } in
+    cons_assign (BCP unit_true) Term.true_ Value.true_  e
 
-  let rec iter k = function
+  let rec iter k self = match self.stack with
     | Nil -> ()
     | Cons {kind;op;next;level;_} ->
       k (kind, level, op);
@@ -771,7 +819,7 @@ module Trail = struct
   let to_iter (tr:t) : (kind * int * op) Iter.t = fun k -> iter k tr
   let iter_terms (tr:t) : Term.t Iter.t =
     to_iter tr |> Iter.map (fun (_,_,op) -> Op.lhs op)
-  let iter_op (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
+  let iter_ops (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
   let length tr = to_iter tr |> Iter.length
 
   let pp_trail_elt out (k,level,op) =
@@ -843,11 +891,11 @@ module State = struct
     let is_ass x = Assignment.does_evaluate ass x in
     (* pairs of impossible assignments *)
     let pairs : (Term.t * Term.t * _) list =
-      Trail.iter_op trail
+      Trail.iter_ops trail
       |> Iter.filter_map
         (function
-          | Trail.Rewrite _ -> None
-          | Trail.Assign {t; value} ->
+          | Op.Rewrite _ -> None
+          | Op.Assign {t; value} ->
             begin match Term.view t, value with
               | Term.Eq (a,b), Value.Bool bool when is_ass a && not (is_ass b) ->
                 let value = Assignment.evaluate_exn ass a in
@@ -890,16 +938,16 @@ module State = struct
   let compute_uf_sigs trail =
     let ass = Trail.assign trail in
     let is_ass x = Assignment.does_evaluate ass x in
-    Trail.iter_op trail
+    Trail.iter_ops trail
     |> Iter.filter_map
       (function
-        | Trail.Rewrite {l=t;r} ->
+        | Op.Rewrite {l=t;r} ->
           begin match Term.view t, Assignment.evaluate ass r with
             | Term.App (f, l), Some v when List.for_all is_ass l ->
               Some ((f, List.map (Assignment.evaluate_exn ass) l), (v,t))
             | _ -> None
           end
-        | Trail.Assign {t; value=v} ->
+        | Op.Assign {t; value=v} ->
           begin match Term.view t with
             | Term.App (f, l) when List.for_all is_ass l ->
               Some ((f, List.map (Assignment.evaluate_exn ass) l), (v,t))
@@ -926,7 +974,7 @@ module State = struct
     { env; cs; trail; status; _all_vars; _to_decide; _uf_sigs; _uf_domain; }
 
   let empty : t =
-    make Env.empty Clause.Set.empty (Trail.empty ~env:Env.empty) Searching
+    make Env.empty Clause.Set.empty (Trail.empty Env.empty) Searching
 
   let pp_conflict_uf out = function
     | CUF_forbid {t;v;lit_force;lit_forbid} ->
@@ -951,9 +999,9 @@ module State = struct
   let pp out (self:t) : unit =
     Fmt.fprintf out
       "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs@ (@[<v>%a@])@]@ \
-       @[<2>:trail@ %a@]@ @[<2>:env@ %a@]@])"
+       @[<2>:trail@ %a@]@ @[<2>:prec %a@]@ @[<2>:env@ %a@]@])"
       pp_status self.status (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
-      Trail.pp self.trail Env.pp self.env
+      Trail.pp self.trail Precedence.pp (Trail.prec self.trail) Env.pp self.env
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
     let open P in
@@ -981,7 +1029,7 @@ module State = struct
   let parse : t P.t =
     let open P.Infix in
     parse_rec Env.empty [] >|= fun (env,cs) ->
-    make env (Clause.Set.of_list cs) (Trail.empty ~env) Searching
+    make env (Clause.Set.of_list cs) (Trail.empty env) Searching
 
   (* ######### *)
 
@@ -991,28 +1039,28 @@ module State = struct
     | Conflict_bool c when Clause.is_empty c ->
       Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
     | Conflict_bool c ->
-      begin match self.trail with
-        | Trail.Nil -> Some (Error "empty trail") (* should not happen *)
-        | Trail.Cons {kind=BCP d;op=Trail.Assign {t=lit;value=Value.Bool false}; next;_} ->
+      begin match Trail.pop self.trail with
+        | None -> Some (Error "empty trail") (* should not happen *)
+        | Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
           (* resolution *)
           assert (Clause.contains (Term.not_ lit) d);
           let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
           let expl = Fmt.sprintf "resolve on `@[¬%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
-        | Trail.Cons {kind=BCP d;op=Assign{t=lit;_};next;_} when Clause.contains (Term.not_ lit) c ->
+        | Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
           let expl = Fmt.sprintf "resolve on `@[%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (make self.env self.cs next (Conflict_bool res), expl))
-        | Trail.Cons {kind=BCP _; op; next; _} ->
+        | Some (BCP _, op, next) ->
           let expl = Fmt.sprintf "consume-bcp %a" Term.pp (Op.lhs op) in
           Some (One (make self.env self.cs next self.status, expl))
-        | Trail.Cons {kind=Eval; op; next; _} ->
+        | Some (Eval, op, next) ->
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
           Some (One (make self.env self.cs next self.status, expl))
-        | Trail.Cons {kind=Decision; op=Op.Rewrite _; _ } -> assert false
-        | Trail.Cons {kind=Decision; next; op=Op.Assign {t=lit;_}; _ } ->
+        | Some (Decision, Op.Rewrite _, _) -> assert false
+        | Some (Decision, Op.Assign {t=lit;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
@@ -1029,7 +1077,7 @@ module State = struct
               Fmt.sprintf "backjump+semantic split with learnt clause %a@ @[<2>decide %a@ in %a@]"
                 Clause.pp c Term.pp decision Clause.pp c_reduced
             in
-            let trail = Trail.cons_assign ~env:self.env Trail.Decision decision Value.true_ next in
+            let trail = Trail.cons_assign Trail.Decision decision Value.true_ next in
             Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
           ) else (
             Some
@@ -1057,7 +1105,7 @@ module State = struct
     match find_unit_c self with
     | Some (c,lit) ->
       let expl = Fmt.sprintf "@[<2>propagate %a@ from %a@]" Term.pp lit Clause.pp c in
-      let trail = Trail.cons_assign ~env:self.env (BCP c) lit Value.true_ self.trail in
+      let trail = Trail.cons_assign (BCP c) lit Value.true_ self.trail in
       Some (ATS.One (make self.env self.cs trail Searching, expl))
     | None -> None
 
@@ -1078,10 +1126,38 @@ module State = struct
                    (Assignment.evaluate_exn ass a)
                    (Assignment.evaluate_exn ass b))
             in
-            let trail = Trail.cons_assign ~env:self.env Trail.Eval t value self.trail in
+            let trail = Trail.cons_assign Trail.Eval t value self.trail in
             let expl = Fmt.asprintf "eval %a" Term.pp t in
             Some (ATS.One (make self.env self.cs trail Searching, expl))
           | _ -> None)
+
+  (* find [(a=b) <- true] where [a] and [b] are not assigned,
+     and add [a --> b] (if a>_kbo b) *)
+  let add_rw_rule_ self : (_*_) ATS.step option =
+    let ass = Trail.assign self.trail in
+    let has_ass t = Assignment.does_evaluate ass t in
+    Trail.iter_ops self.trail
+    |> Iter.find_map
+      (function
+        | Op.Assign {t; value} ->
+          begin match Term.view t, value with
+            | Term.Eq (a, b), Value.Bool true
+              when not (Term.equal a b) && not (has_ass a) && not (has_ass b) ->
+              (* [a=b], we can rewrite *)
+              let prec = Trail.prec self.trail in
+              let a, b = if KBO.compare ~prec a b > 0 then a, b else b, a in
+              if Assignment.does_normalize ass a then (
+                (* TODO: add [b= norm(a)] ? *)
+                None (* already assigned *)
+              ) else (
+                (* FIXME: remove Eval and use a custom kind *)
+                let trail = Trail.cons_rw Trail.Eval a b self.trail in
+                let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
+                Some (ATS.One (make self.env self.cs trail Searching, expl))
+              )
+            | _ -> None
+          end
+        | Op.Rewrite _ -> None)
 
   let is_searching self = match self.status with
     | Searching -> true
@@ -1101,7 +1177,7 @@ module State = struct
           (fun x ->
              let mk_ v value =
                make self.env self.cs
-                 (Trail.cons_assign ~env:self.env Decision v value self.trail)
+                 (Trail.cons_assign Decision v value self.trail)
                  Searching,
                Fmt.sprintf "decide %a <- %a" Term.pp v Value.pp value
              in
@@ -1172,7 +1248,7 @@ module State = struct
     let has_ass x = Assignment.does_evaluate ass x in
     let get_ass x = Assignment.evaluate_exn ass x in
     let l =
-      Trail.iter_op self.trail
+      Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
           | Op.Rewrite {l=t;r} ->
@@ -1293,7 +1369,7 @@ module State = struct
      if_searching find_congruence_conflict;
     ];
     [if_searching propagate];
-    [if_searching propagate_uf_eq];
+    [if_searching propagate_uf_eq; if_searching add_rw_rule_];
     [if_searching decide];
   ]
 end
