@@ -1,6 +1,8 @@
 module Fmt = CCFormat
 module P = Sexp_parser
 
+val quiet_ : bool ref
+
 val pp_list : ?sep:string -> 'a Fmt.printer -> 'a list Fmt.printer
 val pp_iter : ?sep:string -> 'a Fmt.printer -> 'a Iter.t Fmt.printer
 

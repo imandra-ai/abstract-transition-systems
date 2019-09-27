@@ -1029,7 +1029,6 @@ module State = struct
           end
         | Some (Decision, Op.Assign {t;_}, next) ->
           (* decision *)
-          Format.printf "reached decision %a@." Term.pp t;
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
             let expl = Fmt.sprintf "T-consume %a" Term.pp t in

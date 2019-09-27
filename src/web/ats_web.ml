@@ -116,6 +116,7 @@ module Make_calculus(C : CALCULUS)
         (let k = match k with TK_one -> "→" | TK_pick -> "?" in
          div_class "ats-expl" [pre_f "%s %s" k expl]);
         div_class "ats-parent" [
+          pre_f "[%d]" (n-i-1); 
           div ~key:(Printf.sprintf "parent-%d" (n-i)) [C.view st];
           button ~a:[title help_go_back] "go back" (M_go_back i);
         ];
@@ -382,7 +383,7 @@ module App = struct
       ]
 
   let init : model =
-    { error=None; parse=""; auto=20; lm=List.assoc "mcsup" all_; }
+    { error=None; parse=""; auto=100; lm=List.assoc "mcsup" all_; }
 
   let rec update (m:model) (msg:msg) : model =
     match msg, m with
@@ -442,7 +443,7 @@ module App = struct
         button ~a:[title help_auto]
           "auto" (M_calculus (Calculus_msg.M_auto auto));
         input []
-          ~a:[type_ "text"; value (string_of_int auto);
+          ~a:[type_ "text"; value (if auto=0 then "" else string_of_int auto);
               oninput (fun s -> M_set_auto s)];
       ]
     ]

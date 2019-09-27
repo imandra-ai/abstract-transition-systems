@@ -161,13 +161,12 @@ module Make(A: ATS.S) = struct
       | None ->
         (* do one step of [next], with automatic choice if needed *)
         call_next_once_ st;
-        do_auto st (i-1)
+        (do_auto [@tailcall]) st (i-1)
       | Some [] ->
         st.status <- Error "dead end: no possible choice"
       | Some l ->
         auto_choice l;
-        do_auto st (i-1);
-        ()
+        (do_auto [@tailcall]) st (i-1)
     end
 
   let run (tactic:Tactic.t) (st0:A.State.t) : _ * _ =

@@ -196,7 +196,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Auto n ->
       let trace, choices = R.run (R.Tactic.Auto n) !cur_st_ in
-      pp_trace trace;
+      if not !quiet_ then pp_trace trace;
       cur_st_ := trace.R.Trace.final;
       done_ := R.Trace.is_done trace;
       choices_ := choices;
@@ -242,11 +242,12 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
     | l ->
       (* parse initial commands *)
       let l =
-        CCList.flat_map
+        l
+        |> CCList.flat_map (CCString.split_on_char '\n')
+        |> CCList.flat_map
           (fun s -> match P.parse_string Cmd.parse s with
              | Ok l -> l
              | Error msg -> Util.errorf "invalid command: %s" msg)
-          l
       in
       process_cmds l
   end
@@ -265,7 +266,10 @@ let () =
      Printf.sprintf " choose transition system (default %s)" (ATS.name default_ats));
     ("-nc", Arg.Clear color_, " disable colors");
     ("-e", Arg.String (CCList.Ref.push cmds_), " execute given commands");
+    ("-F", Arg.String
+       (fun s -> CCList.Ref.push cmds_ @@ String.trim @@ CCIO.with_in s CCIO.read_all), " load commands from file");
     ("--pp-id", Arg.Set ID._pp_full, " print full IDs");
+    ("-q", Arg.Set quiet_, " quiet");
   ] |> Arg.align
   in
   Arg.parse opts (fun _ -> ()) "usage: ats [option*]";
