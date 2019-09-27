@@ -566,6 +566,7 @@ module Assignment : sig
 
   val rw : t -> Term.t -> Term.t option
   val can_rw : t -> Term.t -> bool
+  val rw_exn : t -> Term.t -> Term.t
 
   val eval : t -> Term.t -> Value.t option
   val eval_exn : t -> Term.t -> Value.t
@@ -622,6 +623,9 @@ end = struct
 
   let rw (self:t) (t:Term.t) = TM.get t self.rw
   let can_rw self t : bool = TM.mem t self.rw
+  let rw_exn self t = match rw self t with
+    | Some u -> u
+    | None -> Util.errorf "rw_exn %a@ in %a" Term.pp t pp self
 
   let eval (self:t) (t:Term.t) : _ option =
     Fmt.printf "evaluate %a in %a@." Term.pp t pp self;
@@ -1155,9 +1159,11 @@ module State = struct
                 (* make it so [a > b] in the ordering *)
                 let a, b = if KBO.compare ~prec a b > 0 then a, b else b, a in
                 if Assignment.can_rw ass a then (
-                  (* TODO: add [b= norm(a)] ? *)
-                  None (* already assigned *)
+                  None (* already assigned, see add_critical_pairs *)
                 ) else (
+                  (* NOTE: this is dangerous, it might make conflict analysis much harder
+                  let b = CCOpt.get_or ~default:b @@ Assignment.rw ass b in (* normalize [b] *)
+                  *)
                   let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
                   Some ((Trail.Paramod t, a, b), expl)
                 )
@@ -1167,6 +1173,68 @@ module State = struct
       |> Iter.to_rev_list
     in
     match ops with
+    | [] -> None
+    | l ->
+      let ops, expl = List.split l in
+      let expl = String.concat "\n" expl in
+      let trail =
+        List.fold_left (fun tr (k,a,b) -> Trail.cons_rw k a b tr) self.trail ops
+      in
+      Some (ATS.One (make self.env self.cs trail Searching, expl))
+
+  exception Found_err of string
+  let found_err msg = raise (Found_err msg)
+  let found_err_f fmt = Fmt.ksprintf ~f:found_err fmt
+
+  let add_critical_pairs self : _ option =
+    let ass = Trail.assign self.trail in
+    let prec = Trail.prec self.trail in
+    let get_rw t = Assignment.rw_exn ass t in
+    let has_rw t = Assignment.can_rw ass t in
+    (* can we rewrite [t] to something that is not [u] and that is
+       smaller than [u]? *)
+    let rewrite_to_smaller_term t ~than:u : bool =
+      match Assignment.rw ass t with
+      | Some v when not (Term.equal u v) && KBO.compare ~prec u v > 0 -> true
+      | _ -> false
+    in
+    let ops () =
+      Trail.iter_ops self.trail
+      |> Iter.filter_map
+        (function
+          | Op.Rewrite {l;r} when has_rw r && not (Term.equal (get_rw l) (get_rw r)) ->
+            (* [l --> r] and [r --> v], so apply transitivity *)
+            let v = get_rw r in
+            if KBO.compare ~prec l v <= 0 then (
+              found_err_f
+                "badly ordered critical pair@ @[%a@ -->@ %a --> %a@]"
+                Term.pp l Term.pp r Term.pp v
+            ) else (
+              (* TODO: proper conflict rule *)
+              let expl =
+                Fmt.sprintf "rewrite-trans@ @[%a@ --> %a@ --> %a@]"
+                  Term.pp l Term.pp r Term.pp v
+              in
+              Some ((Trail.Eval, l, v), expl)
+            )
+          | Op.Rewrite {l; r} when rewrite_to_smaller_term l ~than:r ->
+            (* [v <-- l --> r] with [v < r], so add [r --> v] if it's not there already *)
+            let v = get_rw l in
+            if not (Term.equal (get_rw r) v) then (
+              let expl =
+                Fmt.sprintf "rewrite-peek@ @[%a@ <-- %a@ --> %a@]"
+                  Term.pp r Term.pp l Term.pp v
+              in
+              (* TODO: proper conflict rule *)
+              Some ((Trail.Eval, r, v), expl)
+            ) else (
+              None
+            )
+          | _ -> None)
+      |> Iter.to_rev_list
+    in
+    match ops () with
+    | exception Found_err msg -> Some (ATS.Error msg)
     | [] -> None
     | l ->
       let ops, expl = List.split l in
@@ -1410,7 +1478,9 @@ module State = struct
      if_searching find_congruence_conflict;
     ];
     [if_searching propagate];
-    [if_searching add_rw_rules_; if_searching rw_assign;];
+    [if_searching add_rw_rules_;
+     if_searching add_critical_pairs;
+     if_searching rw_assign];
     [if_searching propagate_uf_eq];
     [if_searching decide];
   ]
