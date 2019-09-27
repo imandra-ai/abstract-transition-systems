@@ -276,6 +276,9 @@ module Term : sig
   val sub : t -> t Iter.t
   val is_bool : t -> bool (** Has boolean type? *)
 
+  val is_false : t -> bool
+  val is_true : t -> bool
+
   val pp : t Fmt.printer
 
   val parse : Env.t -> t P.t
@@ -397,6 +400,9 @@ end = struct
       let view = if compare a b < 0 then Eq (a,b) else Eq(b,a) in
       mk_ view
     )
+
+  let is_false t = match t.view with Bool false -> true | _ -> false
+  let is_true t = match t.view with Bool true -> true | _ -> false
 
   let not_ a = match view a with
     | Bool b -> bool (not b)
@@ -628,7 +634,7 @@ end = struct
     | None -> Util.errorf "rw_exn %a@ in %a" Term.pp t pp self
 
   let eval (self:t) (t:Term.t) : _ option =
-    Fmt.printf "evaluate %a in %a@." Term.pp t pp self;
+    (* Fmt.printf "evaluate %a in %a@." Term.pp t pp self; *)
     TM.get t self.assign
 
   let can_eval self t = TM.mem t self.assign
@@ -650,10 +656,14 @@ module Clause = struct
   let length = Term.Set.cardinal
   let remove l c : t = Term.Set.remove l c
   let union = Term.Set.union
+  let add t c =
+    if Term.is_false t then c else Term.Set.add t c
   let lits c = Term.Set.to_seq c
   let for_all = Term.Set.for_all
   let filter = Term.Set.filter
   let of_list = Term.Set.of_list
+  let map f set =
+    Term.Set.fold (fun x res -> Term.Set.add (f x) res) set Term.Set.empty
 
   let as_unit c = match Term.Set.choose_opt c with
     | None -> None
@@ -710,7 +720,21 @@ module Clause = struct
 end
 
 module Trail : sig
-  type kind = Decision | BCP of Clause.t | Eval | Paramod of Term.t
+  type kind =
+    | Decision
+    | BCP of Clause.t
+    | Eval of Term.t list (* responsible for evaluation *)
+    | Assign_propagate of {
+        eqn: Term.t; (* assigning [t] to the same value as [from] bc [t=from] *)
+        from: Term.t;
+      }
+    | Orient_eqn of {
+        eqn: Term.t; (* eqn [l=r] true in the trail *)
+      }
+    | Transitivity of {
+        eqn1: Term.t;
+        eqn2: Term.t;
+      } 
   type op = Assignment.op
   type t
 
@@ -734,7 +758,21 @@ module Trail : sig
   val iter_terms : t -> Term.t Iter.t
   val iter_ops : t -> Op.t Iter.t
 end = struct
-  type kind = Decision | BCP of Clause.t | Eval | Paramod of Term.t
+  type kind =
+    | Decision
+    | BCP of Clause.t
+    | Eval of Term.t list (* responsible for evaluation *)
+    | Assign_propagate of {
+        eqn: Term.t; (* assigning [t] to the same value as [from] bc [t=from] *)
+        from: Term.t;
+      }
+    | Orient_eqn of {
+        eqn: Term.t; (* eqn [l=r] true in the trail *)
+      }
+    | Transitivity of {
+        eqn1: Term.t;
+        eqn2: Term.t;
+      } 
   type op = Assignment.op =
     | Rewrite of { l: Term.t; r: Term.t; }
     | Assign of { t: Term.t; value: Value.t; }
@@ -772,7 +810,8 @@ end = struct
     let env = next.env in
     let level = match kind with
       | Decision -> 1 + level next
-      | BCP _ | Paramod _ | Eval -> level next
+      | BCP _ | Orient_eqn _ | Assign_propagate _
+      | Transitivity _ | Eval _ -> level next
     and _assign = lazy (
       let a = assign next in
       Assignment.add_op op a
@@ -822,14 +861,23 @@ end = struct
 
   let pp_trail_elt out (k,level,op) =
     let cause = match k with
-      | Decision -> "*" | BCP _ -> "" | Eval -> "$" | Paramod _ -> "=" in
+      | Decision -> "*" | BCP _ -> ""
+      | Eval _ -> "$" | Orient_eqn _ -> "=_>"
+      | Transitivity _ -> "=^*" | Assign_propagate _ -> "<-=" in
     Fmt.fprintf out "@[<h>[%d%s]%a@]" level cause Op.pp op
 
   let pp_kind out = function
     | Decision -> Fmt.string out "decision"
-    | Eval -> Fmt.string out "eval"
+    | Eval l -> Fmt.fprintf out "(@[eval@ %a@])" (Util.pp_list Term.pp) l
     | BCP c -> Fmt.fprintf out "(@[bcp@ :clause %a@])" Clause.pp c
-    | Paramod c -> Fmt.fprintf out "(@[paramod@ :lit %a@])" Term.pp c
+    | Assign_propagate {eqn; from} ->
+      Fmt.fprintf out "(@[assign-propagate@ :eq-to %a@ :eqn %a@])"
+        Term.pp from Term.pp eqn
+    | Orient_eqn {eqn} ->
+      Fmt.fprintf out "(@[orient-eqn@ %a@])" Term.pp eqn
+    | Transitivity {eqn1; eqn2} ->
+      Fmt.fprintf out "(@[transitivity@ :eqn1 %a@ :eqn2 %a@])"
+        Term.pp eqn1 Term.pp eqn2
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[<v>%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -1038,14 +1086,56 @@ module State = struct
 
   (* ######### *)
 
+  (* does [lit] reduce to [false] (partly) because of [l]?
+     and in that case, rewrite [l] into [r] in it. *)
+  let rw_in_lit_if_evals_to_false_ (ass:Assignment.t) ~l ~r (lit:Term.t) : _ option =
+    let rec rw_rec t =
+      let rw_or_same t = CCOpt.get_or ~default:t (rw_rec t) in
+      match Term.view t with
+      | _ when Term.equal t l -> Some r
+      | Term.Bool _ -> None
+      | Term.Not u -> CCOpt.map Term.not_ (rw_rec u)
+      | Term.Eq (a, b) ->
+        begin match rw_rec a, rw_rec b with
+          | Some a', Some b' -> Some (Term.eq a' b')
+          | Some a', None -> Some (Term.eq a' b)
+          | None, Some b' -> Some (Term.eq a b')
+          | None, None -> None
+        end
+      | Term.App (f, l) ->
+        let l' = List.map rw_or_same l in
+        if CCList.equal Term.equal l l' then None else Some (Term.app f l')
+    in
+    match Clause.eval_lit_semantic ass lit with
+    | Some false -> rw_rec lit
+    | _ -> None
+
+  let rw_in_clause_if_evals_to_false (ass:Assignment.t) ~l ~r (c:Clause.t) : Clause.t option =
+    let matched = ref false in
+    let c' =
+      Clause.map
+        (fun lit ->
+           match rw_in_lit_if_evals_to_false_ ass ~l ~r lit with
+           | None -> lit
+           | Some lit' -> matched := true; lit')
+        c
+    in
+    if !matched then Some c' else None
+
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
     | Conflict_bool c when Clause.is_empty c ->
       Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
     | Conflict_bool c ->
+      let ass = Trail.assign self.trail in
       begin match Trail.pop self.trail with
         | None -> Some (Error "empty trail") (* should not happen *)
+        | Some ((Eval _ | Decision | BCP _ | Assign_propagate _) as k,
+                (Op.Rewrite _ as op), _) ->
+          Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
+        | Some ((Orient_eqn _ | Transitivity _) as k, (Op.Assign _ as op), _) ->
+          Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
         | Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
           (* resolution *)
           assert (Clause.contains (Term.not_ lit) d);
@@ -1061,15 +1151,60 @@ module State = struct
         | Some (BCP _, op, next) ->
           let expl = Fmt.sprintf "consume-bcp %a" Term.pp (Op.lhs op) in
           Some (One (make self.env self.cs next self.status, expl))
-        | Some (Eval, op, next) ->
+        | Some (Eval _, (Op.Assign _ as op), next) ->
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
           Some (One (make self.env self.cs next self.status, expl))
-        | Some (Decision, Op.Rewrite _, _) -> assert false
-        | Some (Paramod c, op, next) ->
-          (* TODO: propagation/superposotion *)
-          let expl = Fmt.sprintf "consume-paramod %a@ :eqn %a"
-              Term.pp (Op.lhs op) Term.pp c in
-          Some (One (make self.env self.cs next self.status, expl))
+        | Some (Assign_propagate {eqn; from}, Op.Assign {t; value=_}, next) ->
+          (* find lits of [c] evaluating to [false] because of [t],
+             replace with [from] and add [¬eqn] as guard,
+             otherwise just consume.
+             This rule corresponds to Dejan'17's semantic propagation. *)
+          Format.printf "@[<2>try to rw %a@ into %a@ in %a@ via assign-propagate %a@]@."
+            Term.pp t Term.pp from Clause.pp c Term.pp eqn;
+          begin match rw_in_clause_if_evals_to_false ass ~l:t ~r:from c with
+            | Some c' ->
+              let c' = Clause.add (Term.not_ eqn) c' in
+              let expl = Fmt.sprintf "paramod-assign @[%a --> %a@]@ :eqn %a@ :into %a"
+                  Term.pp t Term.pp from Term.pp eqn Clause.pp c' in
+              Some (One (make self.env self.cs next (Conflict_bool c'), expl))
+            | None ->
+              let expl =
+                Fmt.sprintf "consume-assign-prop %a@ :eqn %a" Term.pp t Term.pp eqn in
+              Some (One (make self.env self.cs next self.status, expl))
+          end
+        | Some (Orient_eqn {eqn}, Op.Rewrite {l;r}, next) ->
+          (* find lits of [c] evaluating to [false] because of [l],
+             replace with [r] and add [¬eqn] as guard,
+             otherwise just consume *)
+          Format.printf "@[<2>try to rw %a@ into %a@ in %a@ via orient-eqn %a@]@."
+            Term.pp l Term.pp r Clause.pp c Term.pp eqn;
+          begin match rw_in_clause_if_evals_to_false ass ~l ~r c with
+            | Some c' ->
+              let c' = Clause.add (Term.not_ eqn) c' in
+              let expl = Fmt.sprintf "paramod-orient-rw @[%a --> %a@]@ :eqn %a@ :into %a"
+                  Term.pp l Term.pp r Term.pp eqn Clause.pp c' in
+              Some (One (make self.env self.cs next (Conflict_bool c'), expl))
+            | None ->
+              let expl =
+                Fmt.sprintf "consume-orient-rw %a@ :eqn %a" Term.pp l Term.pp eqn in
+              Some (One (make self.env self.cs next self.status, expl))
+          end
+        | Some (Transitivity {eqn1;eqn2}, Op.Rewrite {l;r}, next) ->
+          (* find lits of [c] evaluating to [false] because of [l],
+             replace with [r] and add [¬eqn1 or ¬eqn2] as guard,
+             otherwise just consume *)
+          begin match rw_in_clause_if_evals_to_false ass ~l ~r c with
+            | Some c' ->
+              let c' = c' |> Clause.add (Term.not_ eqn1) |> Clause.add (Term.not_ eqn2) in
+              let expl = Fmt.sprintf "paramod-trans @[%a --> %a@]@ :eqn1 %a@ :eqn2 %a@ :into %a"
+                  Term.pp l Term.pp r Term.pp eqn1 Term.pp eqn2 Clause.pp c' in
+              Some (One (make self.env self.cs next (Conflict_bool c'), expl))
+            | None ->
+              let expl =
+                Fmt.sprintf "consume-trans %a@ :eqn1 %a@ :eqn2 %a"
+                  Term.pp l Term.pp eqn1 Term.pp eqn2 in
+              Some (One (make self.env self.cs next self.status, expl))
+          end
         | Some (Decision, Op.Assign {t=lit;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
@@ -1136,7 +1271,7 @@ module State = struct
                    (Assignment.eval_exn ass a)
                    (Assignment.eval_exn ass b))
             in
-            let trail = Trail.cons_assign Trail.Eval t value self.trail in
+            let trail = Trail.cons_assign (Trail.Eval [a;b]) t value self.trail in
             let expl = Fmt.asprintf "eval %a" Term.pp t in
             Some (ATS.One (make self.env self.cs trail Searching, expl))
           | _ -> None)
@@ -1165,7 +1300,7 @@ module State = struct
                   let b = CCOpt.get_or ~default:b @@ Assignment.rw ass b in (* normalize [b] *)
                   *)
                   let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
-                  Some ((Trail.Paramod t, a, b), expl)
+                  Some ((Trail.Orient_eqn {eqn=t}, a, b), expl)
                 )
               | _ -> None
             end
@@ -1186,6 +1321,9 @@ module State = struct
   let found_err msg = raise (Found_err msg)
   let found_err_f fmt = Fmt.ksprintf ~f:found_err fmt
 
+  (* NOTE: FUDGE *)
+  let allow_transitivity_ = ref false
+
   let add_critical_pairs self : _ option =
     let ass = Trail.assign self.trail in
     let prec = Trail.prec self.trail in
@@ -1202,7 +1340,9 @@ module State = struct
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
-          | Op.Rewrite {l;r} when has_rw r && not (Term.equal (get_rw l) (get_rw r)) ->
+          | Op.Rewrite {l;r}
+            when !allow_transitivity_ && has_rw r &&
+                 not (Term.equal (get_rw l) (get_rw r)) ->
             (* [l --> r] and [r --> v], so apply transitivity *)
             let v = get_rw r in
             if KBO.compare ~prec l v <= 0 then (
@@ -1210,12 +1350,12 @@ module State = struct
                 "badly ordered critical pair@ @[%a@ -->@ %a --> %a@]"
                 Term.pp l Term.pp r Term.pp v
             ) else (
-              (* TODO: proper conflict rule *)
               let expl =
                 Fmt.sprintf "rewrite-trans@ @[%a@ --> %a@ --> %a@]"
                   Term.pp l Term.pp r Term.pp v
               in
-              Some ((Trail.Eval, l, v), expl)
+              let kind = Trail.Transitivity {eqn1=Term.eq l r; eqn2=Term.eq r v} in
+              Some ((kind, l, v), expl)
             )
           | Op.Rewrite {l; r} when rewrite_to_smaller_term l ~than:r ->
             (* [v <-- l --> r] with [v < r], so add [r --> v] if it's not there already *)
@@ -1225,8 +1365,8 @@ module State = struct
                 Fmt.sprintf "rewrite-peek@ @[%a@ <-- %a@ --> %a@]"
                   Term.pp r Term.pp l Term.pp v
               in
-              (* TODO: proper conflict rule *)
-              Some ((Trail.Eval, r, v), expl)
+              let kind = Trail.Transitivity {eqn1=Term.eq l v; eqn2=Term.eq l r} in
+              Some ((kind, r, v), expl)
             ) else (
               None
             )
@@ -1256,9 +1396,10 @@ module State = struct
           | Op.Rewrite {l; r} when not (has_ass l) && has_ass r ->
             let v = get_ass r in
             let expl =
-              Fmt.asprintf "assign %a to %a by rw-> %a" Term.pp l Value.pp v Term.pp r in
-            (* TODO: proper reason (which allows to rewrite [l] into [r] in conflict *)
-            Some ((Trail.Eval, l, v), expl)
+              Fmt.asprintf "assign %a to %a by rw-> %a"
+                Term.pp l Value.pp v Term.pp r
+            and kind = Trail.Assign_propagate {from=r; eqn=Term.eq l r} in
+            Some ((kind, l, v), expl)
           | _ -> None)
       |> Iter.to_rev_list
     in
@@ -1474,13 +1615,15 @@ module State = struct
     [is_done];
     [resolve_bool_conflict_; solve_uf_domain_conflict;];
     [if_searching find_false_clause;
-     if_searching find_uf_domain_conflict;
-     if_searching find_congruence_conflict;
     ];
     [if_searching propagate];
+    [if_searching rw_assign];
+    [
+      if_searching find_uf_domain_conflict;
+      if_searching find_congruence_conflict;
+    ];
     [if_searching add_rw_rules_;
-     if_searching add_critical_pairs;
-     if_searching rw_assign];
+     if_searching add_critical_pairs];
     [if_searching propagate_uf_eq];
     [if_searching decide];
   ]
