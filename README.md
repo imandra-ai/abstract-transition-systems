@@ -6,13 +6,13 @@ with new calculi or variants of existing calculi.
 
 - Calculi
   * [x] DPLL
-  * [ ] CDCL
-  * [ ] mcsat '13
+  * [x] CDCL
+  * [x] mcsat '13
   * [ ] mcsat '17 (with non boolean propagations)
   …
 - Interfaces
   * [x] linenoise
-  * [ ] interactive web UI
+  * [x] interactive web UI
 
 ## Example of a session
 
