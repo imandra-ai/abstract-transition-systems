@@ -326,11 +326,13 @@ module App = struct
     lm: logic_model;
   }
 
-  let all_ = [
-    "cdcl", LM { app=(module CDCL); model=CDCL.init; };
-    "mcsat", LM { app=(module MCSAT); model=MCSAT.init; };
-    "mcsup", LM { app=(module MCSUP); model=MCSUP.init; };
-  ]
+  let all_ : _ list =
+    List.map
+      (fun (module M:APP_CALCULUS) -> M.name, LM {app=(module M); model=M.init})
+      [ (module CDCL);
+        (module MCSAT);
+        (module MCSUP);
+      ]
 
   let init : model =
     { error=None; parse=""; auto=20; lm=List.assoc "mcsup" all_; }
