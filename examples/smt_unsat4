@@ -1,0 +1,15 @@
+
+
+(
+  (ty a)
+  (fun x a)
+  (fun y a)
+  (fun p1 bool)
+  (fun p2 bool)
+  (fun f (-> a a))
+  (assert (or p1 (= x y)))
+  (assert (or p1 (= y (f x))))
+  (assert (not (= x (f (f (f x))))))
+  (assert (or (not p1) p2))
+  (assert (or (not p1) (not p2)))
+)
