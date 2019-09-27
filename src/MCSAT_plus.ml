@@ -542,6 +542,7 @@ module Clause = struct
   let choose = Term.Set.choose
   let contains l c = Term.Set.mem l c
   let length = Term.Set.cardinal
+  let mem = Term.Set.mem
   let remove l c : t = Term.Set.remove l c
   let union = Term.Set.union
   let add t c =
@@ -901,9 +902,10 @@ module State = struct
 
   let pp out (self:t) : unit =
     Fmt.fprintf out
-      "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs@ (@[<v>%a@])@]@ \
+      "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs[%d]@ (@[<v>%a@])@]@ \
        @[<2>:trail@ %a@]@ @[<2>:env@ %a@]@])"
-      pp_status self.status (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
+      pp_status self.status (Clause.Set.cardinal self.cs)
+      (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
       Trail.pp self.trail Env.pp self.env
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
@@ -981,6 +983,9 @@ module State = struct
     match self.status with
     | Conflict_bool c when Clause.is_empty c ->
       Some (One (make self.env (Clause.Set.add c self.cs) self.trail Unsat, "learnt false"))
+    | Conflict_bool c when Clause.mem Term.false_ c ->
+      let c = Clause.remove Term.false_ c in
+      Some (One (make self.env self.cs self.trail (Conflict_bool c), "remove false"))
     | Conflict_bool c ->
       let ass = Trail.assign self.trail in
       begin match Trail.pop self.trail with
@@ -1022,18 +1027,20 @@ module State = struct
                   Term.pp t (Fmt.Dump.list Term.pp) guard in
               Some (One (make self.env self.cs next self.status, expl))
           end
-        | Some (Decision, Op.Assign {t=lit;_}, next) ->
+        | Some (Decision, Op.Assign {t;_}, next) ->
           (* decision *)
+          Format.printf "reached decision %a@." Term.pp t;
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
-            let expl = Fmt.sprintf "T-consume %a" Term.pp lit in
+            let expl = Fmt.sprintf "T-consume %a" Term.pp t in
             Some (One (make self.env self.cs next (Conflict_bool c), expl))
           ) else if Clause.length c_reduced=1 then (
             (* normal backjump *)
             let expl = Fmt.sprintf "backjump with learnt clause %a" Clause.pp c in
             Some (One (make self.env (Clause.Set.add c self.cs) next Searching, expl))
-          ) else if Clause.length c_reduced=2 then (
-            (* semantic case split? *)
+          ) else (
+            (* semantic case split *)
+            assert (not (Term.is_bool t));
             let decision = Clause.choose c_reduced in
             let expl =
               Fmt.sprintf "backjump+semantic split with learnt clause %a@ @[<2>decide %a@ in %a@]"
@@ -1041,13 +1048,6 @@ module State = struct
             in
             let trail = Trail.cons_assign Trail.Decision decision Value.true_ next in
             Some (One (make self.env (Clause.Set.add c self.cs) trail Searching, expl))
-          ) else (
-            Some
-              (Error
-                 (Fmt.sprintf "backjump with clause %a@ but filter-false %a@ \
-                               should have at most 2 lits"
-                    Clause.pp c Clause.pp
-                     c_reduced))
           )
       end
     | _ -> None
@@ -1382,6 +1382,7 @@ module State = struct
     ];
     [if_searching propagate_uf_eq];
     [if_searching decide];
+    [fun _ -> Some (Error "no rule applies!")];
   ]
 end
 
