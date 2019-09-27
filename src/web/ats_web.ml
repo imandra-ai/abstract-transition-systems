@@ -91,7 +91,11 @@ module Make_calculus(C : CALCULUS)
   let view (m: model) : _ Vdom.vdom =
     let open Vdom in
     let v_actions_pre, v_actions_post = match m.step with
-      | Ats.ATS.Done | Ats.ATS.Error _ -> [], []
+      | Ats.ATS.Done -> [], []
+      | Ats.ATS.Error msg ->
+        [button ~a:[title help_step] "step" M_step;
+         button ~a:[title_f "error: %s" msg] "next" M_next],
+        []
       | Ats.ATS.One (_,expl) ->
         [button ~a:[title help_step] "step" M_step;
          button ~a:[title expl] "next" M_next;
@@ -415,7 +419,7 @@ module App = struct
     let {error; parse; lm; auto} = m in
     let v_error = match error with
       | None -> []
-      | Some s -> [div ~a:[color "red"] [text s]]
+      | Some s -> [div ~a:[color "red"] [pre s]]
     and v_load = [ 
       ul @@ List.map (fun (s,_) -> button ("use " ^ s) (M_load s)) all_;
     ]
