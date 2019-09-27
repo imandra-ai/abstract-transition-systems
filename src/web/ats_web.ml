@@ -256,6 +256,48 @@ module MCSAT = Make_calculus(struct
       ]
   end)
 
+module MCSAT_plus = Make_calculus(struct
+    module A = Ats.ATS.Make(Ats.MCSAT_plus.A)
+    open Ats.MCSAT_plus
+    open Calculus_msg
+
+    let name = "mcsat+"
+    let view (st:State.t) : Calculus_msg.t Vdom.vdom =
+      let open Vdom in
+      let status, cs, trail, env = State.view st in
+      let a_status = match status with
+        | Sat -> [color "green"; style "bold" "true"]
+        | Unsat -> [color "red"; style "bold" "true"]
+        | Conflict_uf _ | Conflict_bool _ -> [color "orange"]
+        | Searching -> []
+      in
+      div_class "ats-state" [
+        div_class "ats-status"
+          [h5 ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
+        details
+          ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
+          ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
+          (Trail.to_iter trail
+           |> Iter.map
+             (fun ((k,_,_) as elt) ->
+                pre_f ~a:[title_f "%a" Trail.pp_kind k]
+                 "%a" Trail.pp_trail_elt elt)
+           |> Iter.to_list |> div_class "ats-trail"
+        );
+        details ~short:(Fmt.sprintf "clauses (%d)" (Clause.Set.cardinal cs))
+          ~a:[title_f "@[<v>%a@]@." (Clause.Set.pp Clause.pp) cs]
+          (Clause.Set.elements cs |> List.map (fun c -> pre_f "%a" Clause.pp c)
+           |> div_class "ats-clauses"
+        );
+        details ~short:(Fmt.sprintf "env (%d)" (Env.length env))
+          ~a:[title_f "%a@." Env.pp env]
+          (Env.to_iter env
+           |> Iter.map (fun c -> pre_f "%a" Env.pp_item c) |> Iter.to_list
+           |> div_class "ats-clauses"
+        );
+      ]
+  end)
+
 module MCSUP = Make_calculus(struct
     module A = Ats.ATS.Make(Ats.MCSUP.A)
     open Ats.MCSUP
@@ -331,6 +373,7 @@ module App = struct
       (fun (module M:APP_CALCULUS) -> M.name, LM {app=(module M); model=M.init})
       [ (module CDCL);
         (module MCSAT);
+        (module MCSAT_plus);
         (module MCSUP);
       ]
 
