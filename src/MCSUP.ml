@@ -564,12 +564,12 @@ module Assignment : sig
     | Rewrite of {l: Term.t; r: Term.t; }
     | Assign of {t: Term.t; value: Value.t; } 
 
-  val normalize : t -> Term.t -> Term.t
-  val does_normalize : t -> Term.t -> bool
+  val rw : t -> Term.t -> Term.t option
+  val can_rw : t -> Term.t -> bool
 
-  val evaluate : t -> Term.t -> Value.t option
-  val evaluate_exn : t -> Term.t -> Value.t
-  val does_evaluate : t -> Term.t -> bool
+  val eval : t -> Term.t -> Value.t option
+  val eval_exn : t -> Term.t -> Value.t
+  val can_eval : t -> Term.t -> bool
 
   val empty : t
   val add_rw : Term.t -> Term.t -> t -> t
@@ -620,22 +620,15 @@ end = struct
 
   let length self = TM.cardinal self.rw + TM.cardinal self.assign
 
-  let rec normalize (self:t) (t:Term.t) =
-    match TM.find t self.rw with
-    | exception Not_found -> t
-    | u -> 
-      Fmt.printf "normalize %a into %a@." Term.pp t Term.pp u;
-      normalize self u
+  let rw (self:t) (t:Term.t) = TM.get t self.rw
+  let can_rw self t : bool = TM.mem t self.rw
 
-  let does_normalize self t : bool = TM.mem t self.rw
-
-  let evaluate (self:t) (t:Term.t) : _ option =
+  let eval (self:t) (t:Term.t) : _ option =
     Fmt.printf "evaluate %a in %a@." Term.pp t pp self;
-    let t = normalize self t in
     TM.get t self.assign
 
-  let does_evaluate self t = CCOpt.is_some (evaluate self t)
-  let evaluate_exn self t = match evaluate self t with
+  let can_eval self t = TM.mem t self.assign
+  let eval_exn self t = match eval self t with
     | Some x -> x
     | None -> Util.errorf "evaluate_exn %a@ in %a" Term.pp t pp self
 end
@@ -679,7 +672,7 @@ module Clause = struct
   let rec eval_lit_semantic (ass:Assignment.t) (t:Term.t) : bool option =
     match Term.view t with
     | Term.Eq (a,b) ->
-      begin match Assignment.evaluate ass a, Assignment.evaluate ass b with
+      begin match Assignment.eval ass a, Assignment.eval ass b with
         | Some va, Some vb -> Some (Value.equal va vb)
         | _ -> None
       end
@@ -689,14 +682,14 @@ module Clause = struct
 
   (* semantic + trail evaluation *)
   let eval_lit (ass:Assignment.t) (t:Term.t) : bool option =
-    match Assignment.evaluate ass t with
+    match Assignment.eval ass t with
     | Some (Value.Bool b) -> Some b
     | Some _ -> assert false
     | None -> eval_lit_semantic ass t
 
   (* can [t] eval to false? *)
   let lit_eval_to_false (ass:Assignment.t) (t:Term.t) : bool =
-    match Assignment.evaluate ass t, eval_lit_semantic ass t with
+    match Assignment.eval ass t, eval_lit_semantic ass t with
     | Some (Value.Bool false), _ | _, Some false -> true
     | _ -> false
 
@@ -831,8 +824,8 @@ end = struct
   let pp_kind out = function
     | Decision -> Fmt.string out "decision"
     | Eval -> Fmt.string out "eval"
-    | BCP c -> Fmt.fprintf out "(@[bcp@ %a@])" Clause.pp c
-    | Paramod c -> Fmt.fprintf out "(@[paramod@ %a@])" Term.pp c
+    | BCP c -> Fmt.fprintf out "(@[bcp@ :clause %a@])" Clause.pp c
+    | Paramod c -> Fmt.fprintf out "(@[paramod@ :lit %a@])" Term.pp c
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[<v>%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -896,7 +889,7 @@ module State = struct
      We might detect conflicts when doing that. *)
   let compute_uf_domain trail : uf_domain Term.Map.t =
     let ass = Trail.assign trail in
-    let is_ass x = Assignment.does_evaluate ass x in
+    let is_ass x = Assignment.can_eval ass x in
     (* pairs of impossible assignments *)
     let pairs : (Term.t * Term.t * _) list =
       Trail.iter_ops trail
@@ -906,10 +899,10 @@ module State = struct
           | Op.Assign {t; value} ->
             begin match Term.view t, value with
               | Term.Eq (a,b), Value.Bool bool when is_ass a && not (is_ass b) ->
-                let value = Assignment.evaluate_exn ass a in
+                let value = Assignment.eval_exn ass a in
                 Some (t, b, if bool then `Forced value else `Forbid value)
               | Term.Eq (a,b), Value.Bool bool when is_ass b && not (is_ass a) ->
-                let value = Assignment.evaluate_exn ass b in
+                let value = Assignment.eval_exn ass b in
                 Some (t, a, if bool then `Forced value else `Forbid value)
               | _ -> None
             end)
@@ -945,20 +938,20 @@ module State = struct
      also has a value *)
   let compute_uf_sigs trail =
     let ass = Trail.assign trail in
-    let is_ass x = Assignment.does_evaluate ass x in
+    let is_ass x = Assignment.can_eval ass x in
     Trail.iter_ops trail
     |> Iter.filter_map
       (function
         | Op.Rewrite {l=t;r} ->
-          begin match Term.view t, Assignment.evaluate ass r with
+          begin match Term.view t, Assignment.eval ass r with
             | Term.App (f, l), Some v when List.for_all is_ass l ->
-              Some ((f, List.map (Assignment.evaluate_exn ass) l), (v,t))
+              Some ((f, List.map (Assignment.eval_exn ass) l), (v,t))
             | _ -> None
           end
         | Op.Assign {t; value=v} ->
           begin match Term.view t with
             | Term.App (f, l) when List.for_all is_ass l ->
-              Some ((f, List.map (Assignment.evaluate_exn ass) l), (v,t))
+              Some ((f, List.map (Assignment.eval_exn ass) l), (v,t))
             | _ -> None
           end)
     |> SigMap.of_seq
@@ -1111,7 +1104,7 @@ module State = struct
          (* non-false lits *)
          let c' = Clause.filter_false assign c in
          match Clause.as_unit c' with
-         | Some l when not (Assignment.does_evaluate assign l) -> Some (c,l)
+         | Some l when not (Assignment.can_eval assign l) -> Some (c,l)
          | _ -> None)
 
   let propagate self : _ ATS.step option =
@@ -1125,7 +1118,7 @@ module State = struct
   (* find [a=b] where [a] and [b] are assigned *)
   let propagate_uf_eq self : (_*_) ATS.step option =
     let ass = Trail.assign self.trail in
-    let has_ass t = Assignment.does_evaluate ass t in
+    let has_ass t = Assignment.can_eval ass t in
     all_vars self
     |> Term.Set.to_seq
     |> Iter.filter (fun t -> not @@ has_ass t)
@@ -1136,44 +1129,80 @@ module State = struct
             let value =
               Value.bool
                 (Value.equal
-                   (Assignment.evaluate_exn ass a)
-                   (Assignment.evaluate_exn ass b))
+                   (Assignment.eval_exn ass a)
+                   (Assignment.eval_exn ass b))
             in
             let trail = Trail.cons_assign Trail.Eval t value self.trail in
             let expl = Fmt.asprintf "eval %a" Term.pp t in
             Some (ATS.One (make self.env self.cs trail Searching, expl))
           | _ -> None)
 
-  (* find [(a=b) <- true] where [a] and [b] are not assigned,
+  (* find all [(a=b) <- true] where [a] and [b] are not assigned,
      and add [a --> b] (if a>_kbo b) *)
-  let add_rw_rule_ self : (_*_) ATS.step option =
+  let add_rw_rules_ self : (_*_) ATS.step option =
     let ass = Trail.assign self.trail in
-    let has_ass t = Assignment.does_evaluate ass t in
-    Trail.iter_ops self.trail
-    |> Iter.find_map
-      (function
-        | Op.Assign {t; value} ->
-          begin match Term.view t, value with
-            | Term.Eq (a, b), Value.Bool true
-              when not (Term.equal a b) && not (has_ass a) && not (has_ass b) ->
-              (* [a=b], we can rewrite *)
-              let prec = Trail.prec self.trail in
-              let a, b = if KBO.compare ~prec a b > 0 then a, b else b, a in
-              if Assignment.does_normalize ass a then (
-                (* TODO: add [b= norm(a)] ? *)
-                None (* already assigned *)
-              ) else (
-                let trail = Trail.cons_rw (Trail.Paramod t) a b self.trail in
-                let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
-                Some (ATS.One (make self.env self.cs trail Searching, expl))
-              )
-            | _ -> None
-          end
-        | Op.Rewrite _ -> None)
+    let has_ass t = Assignment.can_eval ass t in
+    let ops =
+      Trail.iter_ops self.trail
+      |> Iter.filter_map
+        (function
+          | Op.Assign {t; value} ->
+            begin match Term.view t, value with
+              | Term.Eq (a, b), Value.Bool true
+                when not (Term.equal a b) && not (has_ass a) && not (has_ass b) ->
+                (* [a=b], we can rewrite *)
+                let prec = Trail.prec self.trail in
+                (* make it so [a > b] in the ordering *)
+                let a, b = if KBO.compare ~prec a b > 0 then a, b else b, a in
+                if Assignment.can_rw ass a then (
+                  (* TODO: add [b= norm(a)] ? *)
+                  None (* already assigned *)
+                ) else (
+                  let expl = Fmt.asprintf "rewrite %a into %a" Term.pp a Term.pp b in
+                  Some ((Trail.Paramod t, a, b), expl)
+                )
+              | _ -> None
+            end
+          | Op.Rewrite _ -> None)
+      |> Iter.to_rev_list
+    in
+    match ops with
+    | [] -> None
+    | l ->
+      let ops, expl = List.split l in
+      let expl = String.concat "\n" expl in
+      let trail =
+        List.fold_left (fun tr (k,a,b) -> Trail.cons_rw k a b tr) self.trail ops
+      in
+      Some (ATS.One (make self.env self.cs trail Searching, expl))
 
-  let is_searching self = match self.status with
-    | Searching -> true
-    | _ -> false
+  (* find [a --> b] where [b <- v] and [a] not assigned, and add [a <- v] *)
+  let rw_assign self : (_*_) ATS.step option =
+    let ass = Trail.assign self.trail in
+    let has_ass t = Assignment.can_eval ass t in
+    let get_ass t = Assignment.eval_exn ass t in
+    let ops =
+      Trail.iter_ops self.trail
+      |> Iter.filter_map
+        (function
+          | Op.Rewrite {l; r} when not (has_ass l) && has_ass r ->
+            let v = get_ass r in
+            let expl =
+              Fmt.asprintf "assign %a to %a by rw-> %a" Term.pp l Value.pp v Term.pp r in
+            (* TODO: proper reason (which allows to rewrite [l] into [r] in conflict *)
+            Some ((Trail.Eval, l, v), expl)
+          | _ -> None)
+      |> Iter.to_rev_list
+    in
+    match ops with
+    | [] -> None
+    | l ->
+      let ops, expl = List.split l in
+      let expl = String.concat "\n" expl in
+      let trail =
+        List.fold_left (fun tr (k,t,v) -> Trail.cons_assign k t v tr) self.trail ops
+      in
+      Some (ATS.One (make self.env self.cs trail Searching, expl))
 
   let decide self : _ ATS.step option =
     (* try to decide *)
@@ -1257,14 +1286,14 @@ module State = struct
   let find_congruence_conflict (self:t) : _ option =
     let ass = Trail.assign self.trail in
     let sigs = uf_sigs self in
-    let has_ass x = Assignment.does_evaluate ass x in
-    let get_ass x = Assignment.evaluate_exn ass x in
+    let has_ass x = Assignment.can_eval ass x in
+    let get_ass x = Assignment.eval_exn ass x in
     let l =
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
           | Op.Rewrite {l=t;r} ->
-            begin match Term.view t, Assignment.evaluate ass r with
+            begin match Term.view t, Assignment.eval ass r with
               | Term.App (f, l), Some v when List.for_all has_ass l ->
                 (* see if the signature is compatible with [v] *)
                 begin match SigMap.get (f, List.map get_ass l) sigs with
@@ -1381,7 +1410,8 @@ module State = struct
      if_searching find_congruence_conflict;
     ];
     [if_searching propagate];
-    [if_searching propagate_uf_eq; if_searching add_rw_rule_];
+    [if_searching add_rw_rules_; if_searching rw_assign;];
+    [if_searching propagate_uf_eq];
     [if_searching decide];
   ]
 end
