@@ -109,7 +109,7 @@ module Make(A: ATS.S) = struct
       | Next i -> Fmt.fprintf out "(next %d)" i
   end
 
-  type choice = (A.State.t * string) list
+  type choice = (A.State.t lazy_t * string) list
 
   type tmp_st = {
     mutable cur_st : A.State.t;
@@ -124,10 +124,10 @@ module Make(A: ATS.S) = struct
       st.status <- Trace.Stopped;
     | ATS.Error msg ->
       st.status <- Trace.Error msg;
-    | ATS.One (st', expl) ->
+    | ATS.One (lazy st', expl) ->
       st.trace <- Transition.make_deter st.cur_st st' expl :: st.trace;
       st.cur_st <- st';
-    | ATS.Choice [(st', expl)] ->
+    | ATS.Choice [(lazy st', expl)] ->
       st.trace <- Transition.make_choice st.cur_st st' 1 expl :: st.trace;
       st.cur_st <- st';
     | ATS.Choice [] ->
@@ -150,7 +150,7 @@ module Make(A: ATS.S) = struct
   let rec do_auto (st:tmp_st) i : unit =
     let auto_choice = function
       | [] -> assert false
-      | (st',expl) :: _ ->
+      | (lazy st',expl) :: _ ->
         st.trace <- Transition.make_choice st.cur_st st' 1 expl :: st.trace;
         st.choices <- None;
         st.cur_st <- st';

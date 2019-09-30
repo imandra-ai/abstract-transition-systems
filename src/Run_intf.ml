@@ -51,7 +51,7 @@ module type S = sig
     val pp : t Fmt.printer
   end
 
-  type choice = (A.State.t * string) list
+  type choice = (A.State.t lazy_t * string) list
 
   val run : Tactic.t -> A.State.t -> Trace.t * choice option
 end

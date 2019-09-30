@@ -127,22 +127,23 @@ module State = struct
     let open ATS in
     match self.status with
     | Conflict c when Clause.is_empty c ->
-      Some (One (make (c::self.cs) self.trail Unsat, "learnt false"))
+      let st' = lazy (make (c::self.cs) self.trail Unsat) in
+      Some (One (st', "learnt false"))
     | Conflict c ->
       begin match self.trail with
         | Trail.Nil ->
-          Some (One (make (c::self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
+          Some (One (lazy (make (c::self.cs) self.trail Unsat), "empty trail")) (* unsat! *)
         | Trail.Cons {kind=Prop d;lit;next;_} when Clause.contains (-lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (-lit) c) in
           let expl = Fmt.sprintf "resolve on %a with %a" Lit.pp lit Clause.pp d in
-          Some (One (make self.cs next (Conflict res), expl))
+          Some (One (lazy (make self.cs next (Conflict res)), expl))
         | Trail.Cons {kind=Prop _; next; _} ->
-          Some (One (make self.cs next self.status, "consume"))
+          Some (One (lazy (make self.cs next self.status), "consume"))
         | Trail.Cons {kind=Decision; _} ->
           (* start backjumping *)
-          Some (One (make self.cs self.trail (Backjump c), "backjump below conflict level"))
+          Some (One (lazy (make self.cs self.trail (Backjump c)), "backjump below conflict level"))
       end
     | _ -> None
 
@@ -150,12 +151,12 @@ module State = struct
     let open ATS in
     match self.status with
     | Backjump c when Clause.is_empty c ->
-      Some (One (make (c::self.cs) self.trail Unsat, "learnt false"))
+      Some (One (lazy (make (c::self.cs) self.trail Unsat), "learnt false"))
     | Backjump c ->
       let rec unwind_trail trail =
         match trail with
         | Trail.Nil -> 
-          Some (One (make (c::self.cs) self.trail Unsat, "empty trail")) (* unsat! *)
+          Some (One (lazy (make (c::self.cs) self.trail Unsat), "empty trail")) (* unsat! *)
         | Trail.Cons {lit; _}
           when Clause.contains (-lit) c
             && Trail.eval_to_false trail (Clause.remove (-lit) c) ->
@@ -163,7 +164,7 @@ module State = struct
           let tr = unwind_till_next_decision trail in
           let expl = Fmt.sprintf "backjump with %a" Clause.pp c in
           let trail = Trail.cons (Prop c) (-lit) tr in
-          Some (One (make (c :: self.cs) trail Searching, expl))
+          Some (One (lazy (make (c :: self.cs) trail Searching), expl))
         | Trail.Cons {next;_} -> unwind_trail next
       and unwind_till_next_decision = function
         | Trail.Nil -> Trail.empty
@@ -189,7 +190,7 @@ module State = struct
     | Some (c,lit) ->
       let expl = Fmt.sprintf "propagate %a from %a" Lit.pp lit Clause.pp c in
       let trail = Trail.cons (Prop c) lit self.trail in
-      Some (ATS.One (make self.cs trail Searching, expl))
+      Some (ATS.One (lazy (make self.cs trail Searching), expl))
     | None -> None
 
   let decide self : _ ATS.step option =
@@ -197,7 +198,7 @@ module State = struct
     let lazy vars = self._to_decide in
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.One (make self.cs self.trail Sat, "all vars decided"))
+      Some (ATS.One (lazy (make self.cs self.trail Sat), "all vars decided"))
     ) else (
       (* multiple possible decisions *)
       let decs =
@@ -205,7 +206,7 @@ module State = struct
         |> Iter.flat_map_l
           (fun v ->
              let mk_ v =
-               make self.cs (Trail.cons Decision v self.trail) Searching,
+               lazy (make self.cs (Trail.cons Decision v self.trail) Searching),
                Fmt.sprintf "decide %a" Lit.pp v
              in
              [mk_ v; mk_ (-v)])
@@ -219,7 +220,7 @@ module State = struct
     | None -> None
     | Some c ->
       (* conflict! *)
-      Some (ATS.One (make self.cs self.trail (Conflict c), "false clause"))
+      Some (ATS.One (lazy (make self.cs self.trail (Conflict c)), "false clause"))
 
   let is_done (self:t) =
     match self.status with

@@ -106,7 +106,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
   let module R = Run.Make(A) in
   (* current state *)
   let cur_st_ = ref A.State.empty in
-  let choices_ : (A.State.t * string) list option ref = ref None in
+  let choices_ : (A.State.t lazy_t * string) list option ref = ref None in
   let done_ = ref false in
   LNoise.set_multiline true;
   (* completion of commands *)
@@ -117,7 +117,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
   LNoise.set_hints_callback Cmd.hints;
   (* print active list of choices *)
   let pp_choices l =
-    let pp1 out (i,(st,expl)) =
+    let pp1 out (i,(lazy st,expl)) =
       Fmt.fprintf out "(@[<hv>@{<Green>*@}[%d] \"@[%a@]\" yielding:@ %a@])"
         i Fmt.text expl A.State.pp st
     in
@@ -225,7 +225,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       end
     | Cmd.Pick i ->
       begin match !choices_, CCOpt.flat_map (fun l -> List.nth_opt l i) !choices_ with
-        | _, Some (c,expl) ->
+        | _, Some (lazy c,expl) ->
           Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@."
             i expl A.State.pp c;
           choices_ := None;

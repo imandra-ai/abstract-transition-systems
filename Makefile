@@ -1,6 +1,6 @@
 
 all:
-	@dune build @all
+	@dune build @all --profile=release
 
 clean:
 	@dune clean

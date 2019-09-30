@@ -27,18 +27,15 @@ module State : sig
     | Unsat
     | Conflict of Clause.t
     | Searching
-  type t = private {
-    cs: Clause.t list;
-    trail: trail;
-    status: status;
-    _all_vars: Lit.Set.t lazy_t;
-    _to_decide: Lit.Set.t lazy_t;
-    _assign: bool Lit.Map.t lazy_t; (* assignment, from trail *)
-  }
+  type t
+  val view : t -> status * trail * Clause.t list
 
   val empty : t
   val make : Clause.t list -> trail -> status -> t
   val pp : t Fmt.printer
+  val pp_status : status Fmt.printer
+  val pp_trail_elt : trail_elt Fmt.printer
+  val pp_trail : trail Fmt.printer
   val parse : t P.t
 end
 

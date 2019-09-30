@@ -73,15 +73,15 @@ module Make_calculus(C : CALCULUS)
   type model = {
     parents: (State.t * transition_kind * string) list; (* parent states *)
     st: State.t; (* current state *)
-    step: (State.t * string) Ats.ATS.step;
+    step: (State.t lazy_t * string) Ats.ATS.step lazy_t;
   }
 
   let init =
     let st = State.empty in
-    { st; parents=[]; step=Ats.ATS.Done; }
+    { st; parents=[]; step=lazy Ats.ATS.Done; }
 
-  let mk_ parents st =
-    { st; parents; step=next st; }
+  let mk_ parents (st:State.t) =
+    { st; parents; step=lazy (next st); }
 
   let parse (s:string) : _ result =
     match Ats.Sexp_parser.parse_string_str State.parse s with
@@ -90,7 +90,8 @@ module Make_calculus(C : CALCULUS)
 
   let view (m: model) : _ Vdom.vdom =
     let open Vdom in
-    let v_actions_pre, v_actions_post = match m.step with
+    let v_actions_pre, v_actions_post =
+      match Lazy.force m.step with
       | Ats.ATS.Done -> [], []
       | Ats.ATS.Error msg ->
         [button ~a:[title help_step] "step" M_step;
@@ -103,7 +104,7 @@ module Make_calculus(C : CALCULUS)
       | Ats.ATS.Choice l ->
         let choices =
           List.mapi
-            (fun i (st,expl) ->
+            (fun i (lazy st,expl) ->
                div_class "ats-choice"
                  [C.view st; button "pick" (M_pick i); text_f "(%s)" expl; ])
             l
@@ -138,17 +139,17 @@ module Make_calculus(C : CALCULUS)
 
   let do_step m =
     let {parents; st; step } = m in
-    match step with
+    match Lazy.force step with
     | Ats.ATS.Done -> Error "done"
     | Ats.ATS.Error msg -> Error msg
-    | Ats.ATS.One (st',expl) ->
+    | Ats.ATS.One (lazy st',expl) ->
       Ok (mk_ ((st,TK_one,expl)::parents) st')
-    | Ats.ATS.Choice ((st',expl)::_) ->
+    | Ats.ATS.Choice ((lazy st',expl)::_) ->
       Ok (mk_ ((st,TK_pick,expl)::parents) st') (* make a choice *)
     | Ats.ATS.Choice _ -> assert false
 
   let rec do_auto n m =
-    match m.step with
+    match Lazy.force m.step with
     | Done -> Ok m
     | _ when n <= 0 -> Ok m
     | _ ->
@@ -159,10 +160,10 @@ module Make_calculus(C : CALCULUS)
   (* follow any number of deterministic transitions *)
   let rec do_multi_next m =
     let {parents; st; step } = m in
-    match step with
+    match Lazy.force step with
     | Error msg -> Error msg
     | Done -> Ok m
-    | One (st',expl) | Choice [st',expl] ->
+    | One (lazy st',expl) | Choice [lazy st',expl] ->
       do_multi_next (mk_ ((st,TK_one,expl) :: parents) st')
     | _ -> Ok m
 
@@ -170,10 +171,10 @@ module Make_calculus(C : CALCULUS)
     let {parents; st; step } = m in
     match msg with
     | M_next ->
-      begin match step with
+      begin match Lazy.force step with
         | Ats.ATS.Done  -> Error "done"
         | Ats.ATS.Error msg -> Error msg
-        | Ats.ATS.One (st',expl) | Ats.ATS.Choice [st',expl] ->
+        | Ats.ATS.One (lazy st',expl) | Ats.ATS.Choice [lazy st',expl] ->
           Ok (mk_ ((st,TK_one,expl)::parents) st')
         | Ats.ATS.Choice _ ->
           Error "need to make a choice"
@@ -182,10 +183,10 @@ module Make_calculus(C : CALCULUS)
     | M_step -> do_step m
     | M_auto n -> do_auto n m
     | M_pick i ->
-      begin match step with
+      begin match Lazy.force step with
         | Ats.ATS.Choice l ->
           begin try
-              let st', expl = List.nth l i in
+              let lazy st', expl = List.nth l i in
               Ok (mk_ ((st,TK_pick,expl)::parents) st')
             with _ -> Error "invalid `pick`"
           end
@@ -198,6 +199,29 @@ module Make_calculus(C : CALCULUS)
         with _ -> Error "invalid index in parents"
       end
 end
+
+module DPLL = Make_calculus(struct
+    module A = Ats.ATS.Make(Ats.DPLL.A)
+    open Ats.DPLL
+    open Calculus_msg
+
+    let name = "dpll"
+    let view (st:State.t) : Calculus_msg.t Vdom.vdom =
+      let open Vdom in
+      let status, trail, cs = State.view st in
+      div_class "ats-state" [
+        div_class "ats-status" [h5 "status: "; pre (Fmt.to_string State.pp_status status)];
+        details ~short:(Fmt.sprintf "trail (%d elts)" (List.length trail))
+          ~a:[title_f "@[<v>%a@]" State.pp_trail trail]
+          (Iter.of_list trail
+          |> Iter.map
+            (fun elt -> pre (Fmt.to_string State.pp_trail_elt elt))
+          |> Iter.to_list |> div_class "ats-trail");
+        details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs))
+          ~a:[title_f "@[<v>%a@]@." (Fmt.Dump.list Clause.pp) cs]
+          (List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses");
+      ]
+  end)
 
 module CDCL = Make_calculus(struct
     module A = Ats.ATS.Make(Ats.CDCL.A)
@@ -376,7 +400,8 @@ module App = struct
   let all_ : _ list =
     List.map
       (fun (module M:APP_CALCULUS) -> M.name, LM {app=(module M); model=M.init})
-      [ (module CDCL);
+      [ (module DPLL);
+        (module CDCL);
         (module MCSAT);
         (module MCSAT_plus);
         (module MCSUP);
