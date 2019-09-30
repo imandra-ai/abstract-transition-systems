@@ -1,6 +1,7 @@
 
+DUNE_OPTS ?= --profile=release
 all:
-	@dune build @all --profile=release
+	@dune build @all $(DUNE_OPTS)
 
 clean:
 	@dune clean
@@ -12,7 +13,7 @@ pin-deps:
 	opam pin -y -n ./vendor/ocaml-vdom/
 
 watch:
-	@dune build @all -w
+	@dune build @all $(DUNE_OPTS) -w
 
 .PHONY: all clean test watch pin-deps
 
