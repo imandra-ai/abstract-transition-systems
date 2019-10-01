@@ -18,8 +18,10 @@ module Vdom = struct
   let div_class ?(a=[]) c x = elt "div" ~a:(class_ c::a) x
   let color s = style "color" s
   let text_f fmt = Fmt.ksprintf ~f:text fmt
+  let id s = str_prop "id" s
   let title s = str_prop "title" s
   let title_f fmt = Fmt.ksprintf ~f:title fmt
+  let on_key_enter ~default m = onkeydown (function {which=13} -> m | _ -> default)
 
   let details ?a ?(open_=false) ?short x =
     let open Vdom in
@@ -93,7 +95,7 @@ module Make_calculus(C : CALCULUS)
     | Error msg -> Error msg
     | Ok st -> Ok (mk_ [] st)
 
-  let view (m: model) : _ Vdom.vdom =
+  let view_ (m: model) : _ Vdom.vdom =
     let open Vdom in
     let v_actions_pre, v_actions_post =
       match Lazy.force m.step with
@@ -144,6 +146,8 @@ module Make_calculus(C : CALCULUS)
       v_actions_post;
       [div ~key:"ats-parents" @@ v_parents];
     ]
+
+  let view m = Vdom.memo view_ m
 
   let do_step m =
     let {parents; st; step } = m in
@@ -394,6 +398,7 @@ module App = struct
   open Vdom
 
   type msg =
+    | M_none
     | M_load of string
     | M_set_parse of string
     | M_parse
@@ -429,6 +434,7 @@ module App = struct
 
   let rec update (m:model) (msg:msg) : model =
     match msg, m with
+    | M_none, _ -> m
     | M_load s, _ ->
       begin
         try let f = List.assoc s all_ in {m with error=None; lm=f; parse=""}
@@ -458,7 +464,7 @@ module App = struct
       end
     | M_and_then (m1,m2), _ -> update (update m m1) m2
 
-  let view (m:model) =
+  let view_ (m:model) =
     let {error; parse; lm=LM {app=(module App);_} as lm; auto} = m in
     let v_error = match error with
       | None -> []
@@ -485,14 +491,20 @@ module App = struct
     and v_parse =
       div_class "ats-setting" [
         button ~cls:"ats-button ats-button--setup" "parse" M_parse;
-        input [] ~a:[type_ "text"; value parse; oninput (fun s -> M_set_parse s)];
+        input [] ~a:[
+          type_ "text"; value parse; id "set-parse"; str_prop "autocomplete" "on";
+          on_key_enter ~default:M_none M_parse;
+          oninput (fun s -> M_set_parse s)];
       ]
     and v_auto =
+      let msg_auto = M_calculus (Calculus_msg.M_auto auto) in
       div_class "ats-setting" [
         button ~cls:"ats-button ats-button--setup" ~a:[title help_auto]
-          "auto" (M_calculus (Calculus_msg.M_auto auto));
+          "auto" msg_auto;
         input []
-          ~a:[type_ "text"; value (if auto=0 then "" else string_of_int auto);
+          ~a:[type_ "number"; str_prop "autocomplete" "on"; id "auto";
+              value (if auto=0 then "" else string_of_int auto);
+              on_key_enter ~default:M_none msg_auto;
               oninput (fun s -> M_set_auto s)];
     ]
     and v_lm = match lm with
@@ -506,6 +518,8 @@ module App = struct
       v_error; v_load; v_load_parse_example;
       v_settings; [section "ats-main" v_lm];
     ]
+
+  let view m = Vdom.memo ~key:"main" view_ m
 
   let app = Vdom.simple_app ~init ~update ~view ()
 end
