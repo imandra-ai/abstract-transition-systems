@@ -21,5 +21,5 @@ BUILD_BASE=_build/default/src/web/
 GBUCKET_BASE=https://storage.cloud.google.com/imandra-ats-demo/
 gs-upload: all
 	sed 's!./ats_web!$(GBUCKET_BASE)ats_web!g' $(BUILD_BASE)ats_web.html > $(BUILD_BASE)index.html
-	gsutil cp '$(BUILD_BASE)*' gs://imandra-ats-demo/
+	gsutil -m cp '$(BUILD_BASE)*' gs://imandra-ats-demo/
 	@echo "stored at https://storage.cloud.google.com/imandra-ats-demo/index.html"
