@@ -1,11 +1,99 @@
 /* basic styling */
 
-.body {
-  font-family: sans-serif;
+html {
+  font-family: 'Share Tech Mono', monospace;
+}
+body {
+  margin: 0;
+  padding: 0;
+}
+.ats-container {
+  max-width: 960px;
 }
 
-.ats {
-  max-width: 800px;
+.ats-header{
+  background: #ebf0f3;
+}
+
+.ats-buttons {
+  display: flex;
+  padding: 1rem 0 0 1rem;
+  flex-flow: row wrap;
+}
+
+.ats-button {
+  display: block;
+  border-radius: 4px;
+  height: 2rem;
+  line-height: 2;
+  margin: 0.2rem;
+  font-size: 0.8rem;
+  min-width: 10rem;
+  font-family: 'Source Code Pro', monospace;
+  color: #005F92;
+
+  /* font-family: 'Share Tech Mono', monospace; */
+  border: none;
+}
+
+.ats-button:hover{
+  background: #2093ff;
+  color: white;
+}
+
+.ats-parse-examples {
+  display: flex;
+  flex-flow: row wrap;
+  padding: 1rem 0 1rem 1rem;
+  margin-bottom: 2rem;
+}
+
+.ats-button--example {
+  background: #00b5ff;
+  color: white;
+}
+
+.ats-setup {
+  padding: 0 0 0 1rem;
+  margin-bottom: 2rem;
+}
+
+.ats-setting {
+  margin-bottom: 1rem;
+}
+
+.ats-input {
+  border: solid 1px #4AC9FB;
+  min-width: 20rem;
+  border-radius: 8px;
+  margin-right: 1rem;
+  padding-left: 1rem;
+}
+
+.ats-setup > div {
+  display: flex;
+}
+
+.ats-button--setup {
+  background: #BEFEEC;
+}
+
+.ats-button--setup:hover {
+  background: #36DCAD;
+  color: white;
+}
+
+.ats-main {
+  padding-left: 1rem;
+}
+
+.ats-title {
+  font-size: 2rem;
+  font-weight: 100;
+}
+
+.ats-group--previous {
+  padding: 1rem 0 0 1rem;
 }
 
 .ats-status {
@@ -13,8 +101,9 @@
   flex-flow: row;
   align-items: center;
 }
+
 .ats-status * {
-  padding-left: 3px;
+  /* padding-left: 3px; */
 }
 
 .ats-parents {
@@ -29,33 +118,35 @@
   flex-flow: row wrap;
   align-items: center;
   justify-content: start;
-  box-shadow: 3px 3px 4px black;
+  background: #F0F6F8;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  /* box-shadow: 3px 3px 4px black; */
 }
 
 .ats-expl {
-  box-shadow: 3px 3px 2px teal;
-  padding: 3px;
+  background: #F0F6F8;
+  /* box-shadow: 3px 3px 2px teal;
+  padding: 3px; */
 }
 
-.ats-parent > * {
-  padding: 1px;
-  margin-left: 5px;
+.ats-parent>* {
+  /* padding: 1px;
+  margin-left: 5px; */
 }
 
 .ats-state {
   display: flex;
   flex-flow: column wrap;
-  margin-top: 3px;
-  margin-bottom: 3px;
-  background-color: lightskyblue;
-  outline: solid teal 1px;
-  box-shadow: 3px 3px 4px black;
-  min-width: 300px;
+  padding-left: 1rem;
+  padding-bottom:1rem;
+  background-color: #ebf0f3;
+  min-width: 30rem;
 }
 
-.ats-state > * {
-  padding: 1px;
-  margin: 1px;
+.ats-state>* {
+  /* padding: 1px;
+  margin: 1px; */
 }
 
 .ats-trail {
@@ -64,16 +155,21 @@
   justify-content: normal;
 }
 
+.ats-clauses pre,
+.ats-trail pre {
+  color: #0071FF;
+  padding-left: 1rem;
+  margin: 0.2rem 0;
+}
+
 .ats-clauses {
   display: flex;
   flex-flow: column wrap;
   justify-content: normal;
 }
 
-.ats-parse-examples {
-  display: flex;
-  flex-flow: row wrap;
-  background-color: lightsteelblue;
+.ats-button--goback {
+  margin-left: 1rem;
 }
 
 .ats-choices {
@@ -84,12 +180,19 @@
   border: green solid 3px;
 }
 
-.ats-choice > * {
+.ats-choice {
+  display: flex;
+  flex-flow: row;
+  justify-content: start;
+  align-items: center;
+  border: none;
+}
+
+.ats-choice>* {
   padding: 3px;
   margin: 5px;
 }
 
-.ats-trail > li {
+.ats-trail>li {
   list-style: none;
 }
-

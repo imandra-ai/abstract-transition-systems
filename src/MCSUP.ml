@@ -426,7 +426,7 @@ end = struct
   let pp_kind out = function
     | Decision -> Fmt.string out "decision"
     | Eval l -> Fmt.fprintf out "(@[eval@ %a@])" (Util.pp_list Term.pp) l
-    | BCP c -> Fmt.fprintf out "(@[bcp@ :clause %a@])" Clause.pp c
+    | BCP c -> Fmt.fprintf out "(@[<hv>bcp@ :clause %a@])" Clause.pp c
     | Assign_propagate {eqn; from} ->
       Fmt.fprintf out "(@[assign-propagate@ :eq-to %a@ :eqn %a@])"
         Term.pp from Term.pp eqn
