@@ -78,9 +78,9 @@ module Make_calculus(C : CALCULUS)
   type transition_kind = TK_pick | TK_one
   type msg = Calculus_msg.t
   type model = {
-    parents: (State.t * transition_kind * string) list; (* parent states *)
+    parents: (State.t * Ats.ATS.is_decision * transition_kind * string) list; (* parent states *)
     st: State.t; (* current state *)
-    step: (State.t lazy_t * string) Ats.ATS.step lazy_t;
+    step: (State.t lazy_t * Ats.ATS.is_decision * string) Ats.ATS.step lazy_t;
   }
 
   let init =
@@ -104,14 +104,14 @@ module Make_calculus(C : CALCULUS)
         [button ~cls:"ats-button" ~a:[title help_step] "step" M_step;
          button ~cls:"ats-button" ~a:[title_f "error: %s" msg] "next" M_next],
         []
-      | Ats.ATS.One (_,expl) ->
+      | Ats.ATS.One (_,_,expl) ->
         [button ~cls:"ats-button" ~a:[title help_step] "step" M_step;
          button ~cls:"ats-button" ~a:[title expl] "next" M_next;
          button ~cls:"ats-button" ~a:[title help_multinext] "next*" M_multi_next], []
       | Ats.ATS.Choice l ->
         let choices =
           List.mapi
-            (fun i (lazy st,expl) ->
+            (fun i (lazy st,_,expl) ->
                div_class "ats-choice"
                  [C.view st;
                   button ~cls:"ats-button" "pick" (M_pick i);
@@ -122,7 +122,7 @@ module Make_calculus(C : CALCULUS)
         [h2 "choices:"; div_class "ats-choices" choices]
     and v_parents =
       let n = List.length m.parents in
-      let view_parent i (st,k,expl) = [
+      let view_parent i (st,_is_dec,k,expl) = [
         (let k = match k with TK_one -> "→" | TK_pick -> "?" in
          div_class "ats-expl" [pre_f "%s %s" k expl]);
         div_class "ats-parent" [
@@ -134,10 +134,14 @@ module Make_calculus(C : CALCULUS)
       ]
       in
       if n=0 then []
-      else [div_class "ats-group--previous"
-              [details ~open_:true ~short:(Printf.sprintf "previous (%d)" n)
+      else (
+        let n_dec = CCList.count (fun (_,is_dec,_,_) -> is_dec) m.parents in
+        [div_class "ats-group--previous"
+              [details ~open_:true
+                 ~short:(Printf.sprintf "previous (%d, %d decs)" n n_dec)
                  (div_class "ats-parents"
                   @@ List.flatten @@ List.mapi view_parent m.parents)]]
+      )
     in
     div_class "ats-group" @@ List.flatten [
       [h2 name];
@@ -154,10 +158,10 @@ module Make_calculus(C : CALCULUS)
     match Lazy.force step with
     | Ats.ATS.Done -> Error "done"
     | Ats.ATS.Error msg -> Error msg
-    | Ats.ATS.One (lazy st',expl) ->
-      Ok (mk_ ((st,TK_one,expl)::parents) st')
-    | Ats.ATS.Choice ((lazy st',expl)::_) ->
-      Ok (mk_ ((st,TK_pick,expl)::parents) st') (* make a choice *)
+    | Ats.ATS.One (lazy st',is_dec,expl) ->
+      Ok (mk_ ((st,is_dec,TK_one,expl)::parents) st')
+    | Ats.ATS.Choice ((lazy st',is_dec,expl)::_) ->
+      Ok (mk_ ((st,is_dec,TK_pick,expl)::parents) st') (* make a choice *)
     | Ats.ATS.Choice _ -> assert false
 
   let rec do_auto n m =
@@ -175,8 +179,8 @@ module Make_calculus(C : CALCULUS)
     match Lazy.force step with
     | Error msg -> Error msg
     | Done -> Ok m
-    | One (lazy st',expl) | Choice [lazy st',expl] ->
-      do_multi_next (mk_ ((st,TK_one,expl) :: parents) st')
+    | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
+      do_multi_next (mk_ ((st,is_dec,TK_one,expl) :: parents) st')
     | _ -> Ok m
 
   let update (m:model) (msg:msg) : _ result =
@@ -184,11 +188,11 @@ module Make_calculus(C : CALCULUS)
     match msg with
     | M_next ->
       begin match Lazy.force step with
-        | Ats.ATS.Done  -> Error "done"
-        | Ats.ATS.Error msg -> Error msg
-        | Ats.ATS.One (lazy st',expl) | Ats.ATS.Choice [lazy st',expl] ->
-          Ok (mk_ ((st,TK_one,expl)::parents) st')
-        | Ats.ATS.Choice _ ->
+        | Done  -> Error "done"
+        | Error msg -> Error msg
+        | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
+          Ok (mk_ ((st,is_dec,TK_one,expl)::parents) st')
+        | Choice _ ->
           Error "need to make a choice"
       end
     | M_multi_next -> do_multi_next m
@@ -198,15 +202,15 @@ module Make_calculus(C : CALCULUS)
       begin match Lazy.force step with
         | Ats.ATS.Choice l ->
           begin try
-              let lazy st', expl = List.nth l i in
-              Ok (mk_ ((st,TK_pick,expl)::parents) st')
+              let lazy st', is_dec, expl = List.nth l i in
+              Ok (mk_ ((st,is_dec, TK_pick,expl)::parents) st')
             with _ -> Error "invalid `pick`"
           end
         | _ -> Error "cannot pick a state, not in a choice state"
       end
     | M_go_back i ->
       begin try
-          let st, _, _expl = List.nth parents i in
+          let st, _, _, _expl = List.nth parents i in
           Ok (mk_ (CCList.drop (i+1) parents) st)
         with _ -> Error "invalid index in parents"
       end
@@ -284,8 +288,8 @@ module MCSAT = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
-                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d)"
+                    (Trail.length trail) (Trail.level trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
           |> Iter.map (fun elt -> pre_trail_f "%a" Trail.pp_trail_elt elt)
@@ -325,8 +329,8 @@ module MCSAT_plus = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
-                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d)"
+                    (Trail.length trail) (Trail.level trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
            |> Iter.map
@@ -370,8 +374,8 @@ module MCSUP = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
-                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d)"
+                    (Trail.length trail) (Trail.level trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
            |> Iter.map

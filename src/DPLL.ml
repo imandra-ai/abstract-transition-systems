@@ -87,13 +87,13 @@ module State = struct
     | Conflict c ->
       begin match self.trail with
       | [] ->
-        Some (One (lazy (make self.cs self.trail Unsat), "empty trail")) (* unsat! *)
+        Some (One (lazy (make self.cs self.trail Unsat), false, "empty trail")) (* unsat! *)
       | (Decision,lit)::trail' when lit> 0 ->
         (* backtrack, and make opposite decision *)
-        Some (One (lazy (make self.cs ((Decision, -lit) :: trail') Searching), "backtrack"))
+        Some (One (lazy (make self.cs ((Decision, -lit) :: trail') Searching), false, "backtrack"))
       | _::trail' ->
         (* backtrack further *)
-        Some (One (lazy (make self.cs trail' (Conflict c)), "backtrack"))
+        Some (One (lazy (make self.cs trail' (Conflict c)), false, "backtrack"))
       end
     | _ -> None
 
@@ -112,7 +112,7 @@ module State = struct
     match find_unit_c self with
     | Some (c,l) ->
       let expl = Fmt.sprintf "propagate %a from %a" Lit.pp l Clause.pp c in
-      Some (ATS.One (lazy (make self.cs ((Prop c,l)::self.trail) Searching), expl))
+      Some (ATS.One (lazy (make self.cs ((Prop c,l)::self.trail) Searching), false, expl))
     | None -> None
 
   let decide self : _ ATS.step option =
@@ -120,14 +120,14 @@ module State = struct
     let lazy vars = self._to_decide in
     if Lit.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.One (lazy (make self.cs self.trail Sat), "all vars decided"))
+      Some (ATS.One (lazy (make self.cs self.trail Sat), false, "all vars decided"))
     ) else (
       (* decisions, always positive *)
       let decs =
         Lit.Set.to_seq vars
         |> Iter.map
           (fun v ->
-             lazy (make self.cs ((Decision,v) :: self.trail) Searching),
+             lazy (make self.cs ((Decision,v) :: self.trail) Searching), true,
              Fmt.sprintf "decide %a" Lit.pp v)
         |> Iter.to_rev_list
       in
@@ -139,7 +139,7 @@ module State = struct
     | None -> None
     | Some c ->
       (* conflict! *)
-      Some (ATS.One (lazy (make self.cs self.trail (Conflict c)), "false clause"))
+      Some (ATS.One (lazy (make self.cs self.trail (Conflict c)), false, "false clause"))
 
   let is_done (self:t) =
     match self.status with

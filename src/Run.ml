@@ -124,16 +124,16 @@ module Make(A: ATS.S) = struct
       st.status <- Trace.Stopped;
     | ATS.Error msg ->
       st.status <- Trace.Error msg;
-    | ATS.One (lazy st', expl) ->
+    | ATS.One (lazy st', _, expl) ->
       st.trace <- Transition.make_deter st.cur_st st' expl :: st.trace;
       st.cur_st <- st';
-    | ATS.Choice [(lazy st', expl)] ->
+    | ATS.Choice [(lazy st', _, expl)] ->
       st.trace <- Transition.make_choice st.cur_st st' 1 expl :: st.trace;
       st.cur_st <- st';
     | ATS.Choice [] ->
       st.status <- Trace.Error "dead end: empty choice list"
     | ATS.Choice l ->
-      st.choices <- Some l
+      st.choices <- Some (List.map (fun (st,_,e) -> st,e) l)
 
   (* run [A.next] at most [i] times, but stop if it finishes or a choice
      must be made. *)
