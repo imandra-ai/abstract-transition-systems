@@ -100,30 +100,30 @@ module SigMap = CCMap.Make(struct
 
 module Op : sig
   type t =
-    | Rewrite of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   val lhs : t -> Term.t
   val pp : t Fmt.printer
 end = struct
   type t =
-    | Rewrite of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   let[@inline] lhs = function
-    | Rewrite {l;_} -> l
+    | Make_eq {l;_} -> l
     | Assign {t;_} -> t
 
   let pp out = function
     | Assign {t; value} -> Fmt.fprintf out "(@[<2>%a@ <- %a@])" Term.pp t Value.pp value
-    | Rewrite {l;r} -> Fmt.fprintf out "(@[<2>%a@ --> %a@])" Term.pp l Term.pp r
+    | Make_eq {l;r} -> Fmt.fprintf out "(@[<2>%a@ --> %a@])" Term.pp l Term.pp r
 end
 
 module Assignment : sig
   type t
 
   type op = Op.t =
-    | Rewrite of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   val rw : t -> Term.t -> Term.t option
@@ -153,11 +153,11 @@ end = struct
   let empty : t = { rw=TM.empty; assign=TM.empty; }
 
   type op = Op.t =
-    | Rewrite of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   let to_iter self =
-    let l1 = TM.to_seq self.rw |> Iter.map (fun (l,r) -> Rewrite {l;r}) in
+    let l1 = TM.to_seq self.rw |> Iter.map (fun (l,r) -> Make_eq {l;r}) in
     let l2 = TM.to_seq self.assign |> Iter.map (fun (t,value) -> Assign {t;value}) in
     Iter.append l1 l2
 
@@ -179,7 +179,7 @@ end = struct
 
   let add_op op self : t = match op with
     | Assign {t; value} -> add_assign t value self
-    | Rewrite {l; r} -> add_rw l r self
+    | Make_eq {l; r} -> add_rw l r self
 
   let length self = TM.cardinal self.rw + TM.cardinal self.assign
 
@@ -307,6 +307,7 @@ module Trail : sig
   val assign : t -> Assignment.t
   val assigned_vars : t -> Var.t list
   val length : t -> int
+  val n_decisions : t -> int
 
   val empty : Env.t -> t
   val level : t -> int
@@ -334,7 +335,7 @@ end = struct
         eqn2: Term.t;
       } 
   type op = Assignment.op =
-    | Rewrite of { l: Term.t; r: Term.t; }
+    | Make_eq of { l: Term.t; r: Term.t; }
     | Assign of { t: Term.t; value: Value.t; }
   type t = {
     env: Env.t;
@@ -379,7 +380,7 @@ end = struct
     and _assigned_vars =
       let l = assigned_vars next in
       match op with
-      | Op.Rewrite _ -> l
+      | Op.Make_eq _ -> l
       | Op.Assign {t;_} ->
         match Term.view t with
           | App (f, []) -> f :: l
@@ -396,7 +397,7 @@ end = struct
     cons kind (Assign {t; value}) next
 
   let cons_rw kind (l:Term.t) (r:Term.t) next : t =
-    cons kind (Rewrite {l;r}) next
+    cons kind (Make_eq {l;r}) next
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty env =
@@ -418,6 +419,7 @@ end = struct
     to_iter tr |> Iter.map (fun (_,_,op) -> Op.lhs op)
   let iter_ops (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
   let length tr = to_iter tr |> Iter.length
+  let n_decisions tr = to_iter tr |> Iter.filter (fun (k,_,_) -> k=Decision) |> Iter.length
 
   let pp_trail_elt out (k,level,op) =
     let cause = match k with
@@ -507,7 +509,7 @@ module State = struct
       Trail.iter_ops trail
       |> Iter.filter_map
         (function
-          | Op.Rewrite _ -> None
+          | Op.Make_eq _ -> None
           | Op.Assign {t; value} ->
             begin match Term.view t, value with
               | Term.Eq (a,b), Value.Bool bool when is_ass a && not (is_ass b) ->
@@ -554,7 +556,7 @@ module State = struct
     Trail.iter_ops trail
     |> Iter.filter_map
       (function
-        | Op.Rewrite {l=t;r} ->
+        | Op.Make_eq {l=t;r} ->
           (* if [f(t1…tn) --> r] and [r] is assigned, and all [t_i] are,
              add [f(val(t_1)…val(t_n)) <- val(r)] *)
           begin match Term.view t, Assignment.eval ass r with
@@ -702,7 +704,7 @@ module State = struct
       begin match Trail.pop self.trail with
         | None -> Some (Error "empty trail") (* should not happen *)
         | Some ((Eval _ | Decision | BCP _ | Assign_propagate _) as k,
-                (Op.Rewrite _ as op), _) ->
+                (Op.Make_eq _ as op), _) ->
           Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
         | Some ((Orient_eqn _ | Transitivity _) as k, (Op.Assign _ as op), _) ->
           Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
@@ -745,7 +747,7 @@ module State = struct
               in
               Some (One (lazy (make self.env self.cs next self.status), expl))
           end
-        | Some (Orient_eqn {eqn}, Op.Rewrite {l;r}, next) ->
+        | Some (Orient_eqn {eqn}, Op.Make_eq {l;r}, next) ->
           (* find lits of [c] evaluating to [false] because of [l],
              replace with [r] and add [¬eqn] as guard,
              otherwise just consume *)
@@ -762,7 +764,7 @@ module State = struct
                 Fmt.sprintf "consume-orient-rw %a@ :eqn %a" Term.pp l Term.pp eqn in
               Some (One (lazy (make self.env self.cs next self.status), expl))
           end
-        | Some (Transitivity {eqn1;eqn2}, Op.Rewrite {l;r}, next) ->
+        | Some (Transitivity {eqn1;eqn2}, Op.Make_eq {l;r}, next) ->
           (* find lits of [c] evaluating to [false] because of [l],
              replace with [r] and add [¬eqn1 or ¬eqn2] as guard,
              otherwise just consume *)
@@ -958,7 +960,7 @@ module State = struct
                 )
               | _ -> None
             end
-          | Op.Rewrite _ -> None)
+          | Op.Make_eq _ -> None)
       |> Iter.to_rev_list
     in
     match ops with
@@ -996,7 +998,7 @@ module State = struct
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
-          | Op.Rewrite {l;r}
+          | Op.Make_eq {l;r}
             when !allow_transitivity_ && has_rw r &&
                  not (Term.equal (get_rw l) (get_rw r)) ->
             (* [l --> r] and [r --> v], so apply transitivity *)
@@ -1013,7 +1015,7 @@ module State = struct
               let kind = Trail.Transitivity {eqn1=Term.eq l r; eqn2=Term.eq r v} in
               Some ((kind, l, v), expl)
             )
-          | Op.Rewrite {l; r} when rewrite_to_smaller_term l ~than:r ->
+          | Op.Make_eq {l; r} when rewrite_to_smaller_term l ~than:r ->
             (* [v <-- l --> r] with [v < r], so add [r --> v] if it's not there already *)
             let v = get_rw l in
             if not (Term.equal (get_rw r) v) then (
@@ -1050,7 +1052,7 @@ module State = struct
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
-          | Op.Rewrite {l; r} when not (has_ass l) && has_ass r ->
+          | Op.Make_eq {l; r} when not (has_ass l) && has_ass r ->
             let v = get_ass r in
             let expl =
               Fmt.asprintf "assign %a to %a by rw-> %a"
@@ -1159,36 +1161,37 @@ module State = struct
     let sigs = uf_sigs self in
     let has_ass x = Assignment.can_eval ass x in
     let get_ass x = Assignment.eval_exn ass x in
+    (* check if [t<-v] is a congruence conflict where [t=f(args)] *)
+    let check t v =
+      match Term.view t with
+      | Term.App (f, args) when List.for_all has_ass args ->
+        (* see if the signature is compatible with [v] *)
+        begin match SigMap.get (f, List.map get_ass args) sigs with
+          | None -> assert false
+          | Some (v2,_) when Value.equal v v2 -> None (* compatible *)
+          | Some (_v2,t2) ->
+            let cuf = CUF_congruence {f; t1=t;t2} in
+            Some (t, Conflict_uf cuf)
+        end
+      | _ -> None
+    in
     let l =
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
-          | Op.Rewrite {l=t;r} ->
-            begin match Term.view t, Assignment.eval ass r with
-              | Term.App (f, l), Some v when List.for_all has_ass l ->
-                (* see if the signature is compatible with [v] *)
-                begin match SigMap.get (f, List.map get_ass l) sigs with
-                  | None -> assert false
-                  | Some (v2,_) when Value.equal v v2 -> None (* compatible *)
-                  | Some (_v2,t2) ->
-                    let cuf = CUF_congruence {f; t1=t;t2} in
-                    Some (t, Conflict_uf cuf)
-                end
-              | _ -> None
+          | Op.Make_eq {l;r} ->
+            begin match Assignment.eval ass l, Assignment.eval ass r with
+              | None, None -> None
+              | Some v, None -> check r v
+              | None, Some v -> check l v
+              | Some v1, Some v2 ->
+                if Value.equal v1 v2 then None (* compatible *)
+                else (
+                  None (* NOTE: dealt with elsewhere *)
+                )
             end
           | Op.Assign {t;value=v} ->
-            begin match Term.view t with
-              | Term.App (f, l) when List.for_all has_ass l ->
-                (* see if the signature is compatible with [v] *)
-                begin match SigMap.get (f, List.map get_ass l) sigs with
-                  | None -> assert false
-                  | Some (v2,_) when Value.equal v v2 -> None (* compatible *)
-                  | Some (_v2,t2) ->
-                    let cuf = CUF_congruence {f; t1=t;t2} in
-                    Some (t, Conflict_uf cuf)
-                end
-              | _ -> None
-            end)
+            check t v)
       |> Iter.to_rev_list
     in
     let mk_expl t = Fmt.asprintf "UF congruence conflict on %a" Term.pp t in

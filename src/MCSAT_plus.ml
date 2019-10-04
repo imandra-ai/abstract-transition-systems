@@ -187,6 +187,7 @@ module Trail : sig
   val assign : t -> Assignment.t
   val assigned_vars : t -> Var.t list
   val length : t -> int
+  val n_decisions : t -> int
 
   val empty : Env.t -> t
   val level : t -> int
@@ -278,6 +279,7 @@ end = struct
     to_iter tr |> Iter.map (fun (_,_,op) -> Op.lhs op)
   let iter_ops (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
   let length tr = to_iter tr |> Iter.length
+  let n_decisions tr = to_iter tr |> Iter.filter (fun (k,_,_) -> k=Decision) |> Iter.length
 
   let pp_trail_elt out (k,level,op) =
     let cause = match k with

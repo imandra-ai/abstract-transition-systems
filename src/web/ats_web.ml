@@ -284,7 +284,8 @@ module MCSAT = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
+                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
           |> Iter.map (fun elt -> pre_trail_f "%a" Trail.pp_trail_elt elt)
@@ -324,7 +325,8 @@ module MCSAT_plus = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
+                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
            |> Iter.map
@@ -368,7 +370,8 @@ module MCSUP = Make_calculus(struct
         div_class "ats-status"
           [h_status ~a:a_status "status: "; pre (Fmt.to_string State.pp_status status)];
         details
-          ~short:(Fmt.sprintf "trail (%d elts, level %d)" (Trail.length trail) (Trail.level trail))
+          ~short:(Fmt.sprintf "trail (%d elts, level %d, %d decisions)"
+                    (Trail.length trail) (Trail.level trail) (Trail.n_decisions trail))
           ~a:[title_f "@[<v>%a@]@." Trail.pp trail]
           (Trail.to_iter trail
            |> Iter.map

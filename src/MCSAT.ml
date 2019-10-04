@@ -137,6 +137,8 @@ module Trail = struct
   let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,_,t,v) -> t,v)
   let length tr = to_iter tr |> Iter.length
 
+  let n_decisions tr = to_iter tr |> Iter.filter (fun (k,_,_,_) -> k=Decision) |> Iter.length
+
   let pp_trail_elt out (k,level,lit,v) =
     let cause = match k with Decision -> "*" | BCP _ -> "" | Eval -> "$" in
     Fmt.fprintf out "[%d](@[%a%s@ <- %a@])" level Term.pp lit cause Value.pp v
