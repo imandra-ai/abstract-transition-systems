@@ -45,7 +45,7 @@ module type APP_CALCULUS = sig
 
   type msg = Calculus_msg.t
   type model
-  val kind : Ats_examples.kind
+  val kinds : Ats_examples.kind list
 
   val parse : string -> (model, string) result
 
@@ -57,7 +57,7 @@ end
 module type CALCULUS = sig
   module A : Ats.ATS.S
   val name : string
-  val kind : Ats_examples.kind
+  val kinds : Ats_examples.kind list
   val view : A.State.t -> Calculus_msg.t Vdom.vdom
 end
 
@@ -72,7 +72,7 @@ module Make_calculus(C : CALCULUS)
   open C.A
   open Calculus_msg
 
-  let kind = C.kind
+  let kinds = C.kinds
   let name = C.name
 
   type transition_kind = TK_pick | TK_one
@@ -225,7 +225,7 @@ module DPLL = Make_calculus(struct
     open Ats.DPLL
     open Calculus_msg
 
-    let kind = Ats_examples.K_cnf
+    let kinds = [Ats_examples.K_cnf]
     let name = "dpll"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
@@ -249,7 +249,7 @@ module CDCL = Make_calculus(struct
     open Ats.CDCL
     open Calculus_msg
 
-    let kind = Ats_examples.K_cnf
+    let kinds = [Ats_examples.K_cnf]
     let name = "cdcl"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
@@ -273,7 +273,7 @@ module MCSAT = Make_calculus(struct
     open Ats.MCSAT
     open Calculus_msg
 
-    let kind = Ats_examples.K_smt
+    let kinds = [Ats_examples.K_smt]
     let name = "mcsat"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
@@ -314,7 +314,7 @@ module MCSAT_plus = Make_calculus(struct
     open Ats.MCSAT_plus
     open Calculus_msg
 
-    let kind = Ats_examples.K_smt
+    let kinds = [Ats_examples.K_smt]
     let name = "mcsat+"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
@@ -358,7 +358,7 @@ module MCSUP = Make_calculus(struct
     open Ats.MCSUP
     open Calculus_msg
 
-    let kind = Ats_examples.K_smt
+    let kinds = [Ats_examples.K_smt]
     let name = "mcsup"
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
@@ -447,7 +447,7 @@ module App = struct
     | M_none, _ -> m
     | M_use_calculus s, _ ->
       begin match List.assoc s all_, m.cur_file with
-        | LM {app=(module App);_} as f, Some (pb, k_pb, s) when k_pb = App.kind ->
+        | LM {app=(module App);_} as f, Some (pb, k_pb, s) when List.mem k_pb App.kinds ->
           (* use [f], then reload problem's content *)
           let reload =
             M_and_then [M_set_parse s; M_parse; M_set_cur (pb,k_pb,s)]
@@ -498,13 +498,12 @@ module App = struct
     and v_load_parse_example = [
       CCList.filter_map
         (fun (k,name,s) ->
-           if k <> App.kind then None
-           else (
+           if List.mem k App.kinds then (
              let b =
                button_f ~cls:"ats-button ats-button--example" ~a:[title s]
                  (M_and_then [M_set_parse s; M_parse; M_set_cur (name,k,s)]) "load %S" name in
              Some b
-           ))
+           ) else None)
         Ats_examples.all
       |> div_class "ats-parse-examples"
     ]
