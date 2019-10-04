@@ -406,12 +406,13 @@ module App = struct
 
   type msg =
     | M_none
-    | M_load of string
+    | M_use_calculus of string
     | M_set_parse of string
     | M_parse
+    | M_set_cur of string * Ats_examples.kind * string
     | M_set_auto of string
     | M_calculus of Calculus_msg.t
-    | M_and_then of msg * msg
+    | M_and_then of msg list
 
   type logic_model =
     | LM : {
@@ -422,6 +423,7 @@ module App = struct
   type model = {
     error: string option;
     parse: string;
+    cur_file: (string * Ats_examples.kind * string) option; (* [name, kind, content] *)
     auto: int;
     lm: logic_model;
   }
@@ -437,15 +439,25 @@ module App = struct
       ]
 
   let init : model =
-    { error=None; parse=""; auto=100; lm=List.assoc "mcsup" all_; }
+    { error=None; parse=""; auto=100; lm=List.assoc "mcsup" all_;
+      cur_file=None; }
 
   let rec update (m:model) (msg:msg) : model =
     match msg, m with
     | M_none, _ -> m
-    | M_load s, _ ->
-      begin
-        try let f = List.assoc s all_ in {m with error=None; lm=f; parse=""}
-        with Not_found -> {m with error=Some (Printf.sprintf "unknown system %s" s)}
+    | M_use_calculus s, _ ->
+      begin match List.assoc s all_, m.cur_file with
+        | LM {app=(module App);_} as f, Some (pb, k_pb, s) when k_pb = App.kind ->
+          (* use [f], then reload problem's content *)
+          let reload =
+            M_and_then [M_set_parse s; M_parse; M_set_cur (pb,k_pb,s)]
+          in
+          update {m with error=None; lm=f; parse=""} reload
+        | f, _ ->
+          (* incompatible/absent cur file, just remove *)
+          {m with error=None; lm=f; cur_file=None; parse=""}
+        | exception Not_found ->
+          {m with error=Some (Printf.sprintf "unknown system %s" s)}
       end
     | M_set_parse s, _ -> {m with parse=s}
     | M_set_auto s, _ ->
@@ -460,19 +472,20 @@ module App = struct
           App.parse s |> CCResult.map (fun m -> LM {app; model=m})
       in
       begin match lm' with
-        | Ok lm' -> {m with error=None; lm=lm'; parse="";}
+        | Ok lm' -> {m with error=None; cur_file=None; lm=lm'; parse="";}
         | Error msg ->
-          {m with error=Some msg}
+          {m with error=Some msg; cur_file=None;}
       end
     | M_calculus msg, {lm=LM {app=(module App) as app; model};_} ->
       begin match App.update model msg with
         | Ok lm -> {m with error=None; lm=LM {app; model=lm}}
         | Error msg -> {m with error=Some msg}
       end
-    | M_and_then (m1,m2), _ -> update (update m m1) m2
+    | M_set_cur (file,k,content), _ -> {m with cur_file=Some (file,k,content)}
+    | M_and_then l, _ -> List.fold_left update m l
 
   let view_ (m:model) =
-    let {error; parse; lm=LM {app=(module App);_} as lm; auto} = m in
+    let {error; parse; lm=LM {app=(module App);_} as lm; cur_file; auto} = m in
     let v_error = match error with
       | None -> []
       | Some s -> [div ~a:[color "red"] [pre s]]
@@ -480,7 +493,7 @@ module App = struct
       div_class "ats-content"
         [div_class "ats-buttons" @@
          List.map
-           (fun (s,_) -> button ~cls:"ats-button" ("use " ^ s) (M_load s)) all_];
+           (fun (s,_) -> button ~cls:"ats-button" ("use " ^ s) (M_use_calculus s)) all_];
     ]
     and v_load_parse_example = [
       CCList.filter_map
@@ -489,7 +502,7 @@ module App = struct
            else (
              let b =
                button_f ~cls:"ats-button ats-button--example" ~a:[title s]
-                 (M_and_then (M_set_parse s, M_parse)) "load %S" name in
+                 (M_and_then [M_set_parse s; M_parse; M_set_cur (name,k,s)]) "load %S" name in
              Some b
            ))
         Ats_examples.all
@@ -517,12 +530,15 @@ module App = struct
     and v_lm = match lm with
       | LM {app=(module App); model} ->
         [App.view model |> map (fun x -> M_calculus x)]
+    and v_cur = match cur_file with
+      | None -> []
+      | Some (f,_,_) -> [div_class "ats-cur" [text_f "[current: %S]" f]]
     in
     let v_settings = [
       section "ats-setup" [v_parse; v_auto]
     ] in
     div_class "ats-container" @@ List.flatten [
-      v_error; v_load; v_load_parse_example;
+      v_error; v_load; v_load_parse_example; v_cur;
       v_settings; [section "ats-main" v_lm];
     ]
 

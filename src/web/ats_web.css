@@ -124,6 +124,13 @@ body {
   /* box-shadow: 3px 3px 4px black; */
 }
 
+.ats-cur {
+  font-size: 80%;
+  background: lavender;
+  margin-left: 1rem;
+  padding: 2px;
+}
+
 .ats-expl {
   background: #F0F6F8;
   /* box-shadow: 3px 3px 2px teal;
