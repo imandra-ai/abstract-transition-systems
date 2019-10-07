@@ -666,7 +666,8 @@ module State = struct
             (* normal backjump *)
             let expl = Fmt.sprintf "backjump with learnt clause %a" Clause.pp c in
             let st' = lazy (
-              update self ~cs:(Clause.Set.add c self.cs) ~trail:next ~status:Searching
+              let trail = if Clause.length c=1 then Trail.prefix_0 next else next in
+              update self ~cs:(Clause.Set.add c self.cs) ~trail ~status:Searching
             ) in
             Some (One (st', false, expl))
           ) else (

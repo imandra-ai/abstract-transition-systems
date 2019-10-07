@@ -139,6 +139,10 @@ module Assignment : sig
   val can_rw : t -> Term.t -> bool
   val rw_exn : t -> Term.t -> Term.t * guard
 
+  val rw_back : t -> Term.t -> (Term.t * guard) option
+  (** [rw_back ass r] finds [l,guard] such that [guard => l=r] is
+      a rule in [ass]. *)
+
   val eval : t -> Term.t -> Value.t option
   val eval_exn : t -> Term.t -> Value.t
   val can_eval : t -> Term.t -> bool
@@ -157,10 +161,11 @@ end = struct
   type guard = Term.t list
   type t = {
     rw: (Term.t * guard) TM.t;
+    rw_back: (Term.t * guard) TM.t;
     assign: Value.t TM.t;
   }
 
-  let empty : t = { rw=TM.empty; assign=TM.empty; }
+  let empty : t = { rw=TM.empty; assign=TM.empty; rw_back=TM.empty; }
 
   type op = Op.t =
     | Make_eq of {l: Term.t; r: Term.t; guard: guard; }
@@ -174,7 +179,10 @@ end = struct
   let pp out self =
     Fmt.fprintf out "(@[<hv>%a@])" (Util.pp_iter Op.pp) (to_iter self)
 
-  let add_rw l r ~guard self : t = {self with rw=TM.add l (r,guard) self.rw}
+  let add_rw l r ~guard self : t =
+    {self with
+     rw=TM.add l (r,guard) self.rw;
+     rw_back=TM.add r (l,guard) self.rw_back}
 
   let add_assign t value self : t =
     let assign =
@@ -194,6 +202,7 @@ end = struct
   let length self = TM.cardinal self.rw + TM.cardinal self.assign
 
   let rw (self:t) (t:Term.t) = TM.get t self.rw
+  let rw_back self t = TM.get t self.rw_back
   let can_rw self t : bool = TM.mem t self.rw
   let rw_exn self t = match rw self t with
     | Some u -> u
@@ -832,7 +841,8 @@ module State = struct
             (* normal backjump *)
             let expl = Fmt.sprintf "backjump with learnt clause %a" Clause.pp c in
             let st' = lazy (
-              update self ~cs:(Clause.Set.add c self.cs) ~trail:next ~status:Searching
+              let trail = if Clause.length c=1 then Trail.prefix_0 next else next in
+              update self ~cs:(Clause.Set.add c self.cs) ~trail ~status:Searching
             ) in
             Some (One (st', false, expl))
           ) else (
@@ -899,13 +909,15 @@ module State = struct
     let has_ass t = Assignment.can_eval ass t in
     let get_ass t = Assignment.eval_exn ass t in
     let vars = all_vars self in
-    let as_if t = match Term.view t with
-      | If (a,b,c) -> Some (t,(a,b,c))
-      | _ -> None
-    in
-    match Term.Set.to_seq vars |> Iter.find_map as_if with
-    | Some (t,(a,b,c)) when
-        has_ass a && not (has_ass t) && not (Assignment.can_rw ass t) ->
+    match
+      Term.Set.to_seq vars
+      |> Iter.find_map
+        (fun t -> match Term.view t with
+           | If (a,b,c) when has_ass a && not (Assignment.can_rw ass t) ->
+             Some (t,(a,b,c))
+           | _ -> None)
+    with
+    | Some (t,(a,b,c)) ->
       (* propagate [t=b] or [t=c] *)
       let guard, val_a = match get_ass a with
         | Value.Bool true -> [a], true
@@ -1258,8 +1270,9 @@ module State = struct
     [if_searching find_false_clause;
     ];
     [if_searching propagate];
+    [if_searching rewrite_if];
     [if_searching eq_assign_propagate; if_searching eq_assign_congruence];
-    [if_searching rw_assign; if_searching rewrite_if];
+    [if_searching rw_assign];
     [
       if_searching find_uf_domain_conflict;
       if_searching find_congruence_conflict;

@@ -1,0 +1,16 @@
+
+; if + congruence
+(
+  (ty u)
+  (fun p0 bool)
+  (fun a u)
+  (fun b1 u)
+  (fun b2 u)
+  (fun c u)
+  (fun f (-> u u))
+  (assert (= a (if p0 b1 b2)))
+  (assert (= (f b1) c))
+  (assert (= (f b2) c))
+  (assert (not (= (f a) c)))
+)
+
