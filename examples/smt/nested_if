@@ -1,0 +1,18 @@
+
+; nested ifs
+(
+  (ty u)
+  (fun a u)
+  (fun b u)
+  (fun c u)
+  (fun d u)
+  (fun q0 bool)
+  (fun q1 bool)
+  (fun q2 bool)
+  (fun p (-> u bool))
+  (assert (p a))
+  (assert (p b))
+  (assert (p c))
+  (assert (p d))
+  (assert (not (p (if q0 (if q1 a b) (if q2 c d)))))
+)
