@@ -140,6 +140,11 @@ module Trail = struct
     | Cons r ->
       Cons {r with next=map f r.next; lit=f r.lit}
 
+  let rec prefix_0 self : t = match self with
+    | Nil -> Nil
+    | Cons {level=0;_} -> self
+    | Cons {next;_} -> prefix_0 next
+
   let to_iter (tr:t) : (kind * int * Term.t * Value.t) Iter.t = fun k -> iter k tr
   let iter_terms (tr:t) : Term.t Iter.t = to_iter tr |> Iter.map (fun (_,_,t,_) -> t)
   let iter_ass (tr:t) : (Term.t*Value.t) Iter.t = to_iter tr |> Iter.map (fun (_,_,t,v) -> t,v)

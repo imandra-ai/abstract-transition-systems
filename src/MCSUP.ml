@@ -100,20 +100,27 @@ module SigMap = CCMap.Make(struct
   end)
 
 module Op : sig
+  type guard = Term.t list
   type t =
-    | Make_eq of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; guard: guard; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   val lhs : t -> Term.t
+  val iter_terms : t -> Term.t Iter.t
   val pp : t Fmt.printer
 end = struct
+  type guard = Term.t list
   type t =
-    | Make_eq of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; guard: guard; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   let[@inline] lhs = function
     | Make_eq {l;_} -> l
     | Assign {t;_} -> t
+
+  let iter_terms op f = match op with
+    | Assign {t;_} -> f t
+    | Make_eq {l;r} -> f l; f r
 
   let pp out = function
     | Assign {t; value} -> Fmt.fprintf out "(@[<2>%a@ <- %a@])" Term.pp t Value.pp value
@@ -123,20 +130,21 @@ end
 module Assignment : sig
   type t
 
+  type guard = Term.t list
   type op = Op.t =
-    | Make_eq of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; guard: guard; }
     | Assign of {t: Term.t; value: Value.t; } 
 
-  val rw : t -> Term.t -> Term.t option
+  val rw : t -> Term.t -> (Term.t * guard) option
   val can_rw : t -> Term.t -> bool
-  val rw_exn : t -> Term.t -> Term.t
+  val rw_exn : t -> Term.t -> Term.t * guard
 
   val eval : t -> Term.t -> Value.t option
   val eval_exn : t -> Term.t -> Value.t
   val can_eval : t -> Term.t -> bool
 
   val empty : t
-  val add_rw : Term.t -> Term.t -> t -> t
+  val add_rw : Term.t -> Term.t -> guard:Term.t list -> t -> t
   val add_assign : Term.t -> Value.t -> t -> t
   val add_op : op -> t -> t
 
@@ -146,26 +154,27 @@ module Assignment : sig
   val pp : t Fmt.printer
 end = struct
   module TM = Term.Map
+  type guard = Term.t list
   type t = {
-    rw: Term.t TM.t;
+    rw: (Term.t * guard) TM.t;
     assign: Value.t TM.t;
   }
 
   let empty : t = { rw=TM.empty; assign=TM.empty; }
 
   type op = Op.t =
-    | Make_eq of {l: Term.t; r: Term.t; }
+    | Make_eq of {l: Term.t; r: Term.t; guard: guard; }
     | Assign of {t: Term.t; value: Value.t; } 
 
   let to_iter self =
-    let l1 = TM.to_seq self.rw |> Iter.map (fun (l,r) -> Make_eq {l;r}) in
+    let l1 = TM.to_seq self.rw |> Iter.map (fun (l,(r,guard)) -> Make_eq {l;r;guard}) in
     let l2 = TM.to_seq self.assign |> Iter.map (fun (t,value) -> Assign {t;value}) in
     Iter.append l1 l2
 
   let pp out self =
     Fmt.fprintf out "(@[<hv>%a@])" (Util.pp_iter Op.pp) (to_iter self)
 
-  let add_rw l r self : t = {self with rw=TM.add l r self.rw}
+  let add_rw l r ~guard self : t = {self with rw=TM.add l (r,guard) self.rw}
 
   let add_assign t value self : t =
     let assign =
@@ -180,7 +189,7 @@ end = struct
 
   let add_op op self : t = match op with
     | Assign {t; value} -> add_assign t value self
-    | Make_eq {l; r} -> add_rw l r self
+    | Make_eq {l; r; guard} -> add_rw l r ~guard self
 
   let length self = TM.cardinal self.rw + TM.cardinal self.assign
 
@@ -280,22 +289,20 @@ module Clause = struct
 end
 
 module Trail : sig
+  type guard = Term.t list
   type kind =
     | Decision
     | BCP of Clause.t
     | Eval of Term.t list (* responsible for evaluation *)
     | Assign_propagate of {
         (* assigning [t] to the same value as [from] bc [guard => t=from] *)
-        guard: Term.t list;
+        guard: guard;
         from: Term.t;
       }
-    | Orient_eqn of {
-        eqn: Term.t; (* eqn [l=r] true in the trail *)
+    | Eq_propagate of {
+        guard: guard; (* eqn [l=r] true in the trail because [guard] is true *)
       }
-    | Transitivity of {
-        eqn1: Term.t;
-        eqn2: Term.t;
-      } 
+
   type op = Assignment.op
   type t
 
@@ -312,33 +319,34 @@ module Trail : sig
   val n_decisions : t -> int
   val map : (Term.t -> Term.t) -> t -> t
 
+  val prefix_0 : t -> t
+  (** Prefix of the trail of level 0 *)
+
   val empty : Env.t -> t
   val level : t -> int
   val cons : kind -> op -> t -> t
   val cons_assign : kind -> Term.t -> Value.t -> t -> t
-  val cons_rw : kind -> Term.t -> Term.t -> t -> t
+  val cons_rw : kind -> Term.t -> Term.t -> guard:guard -> t -> t
   val to_iter : t -> (kind * int * op) Iter.t
   val iter_terms : t -> Term.t Iter.t
+  val iter_lhs : t -> Term.t Iter.t
   val iter_ops : t -> Op.t Iter.t
 end = struct
+  type guard = Term.t list
   type kind =
     | Decision
     | BCP of Clause.t
     | Eval of Term.t list (* responsible for evaluation *)
     | Assign_propagate of {
         (* assigning [t] to the same value as [from] bc [guard => t=from] *)
-        guard: Term.t list;
+        guard: guard;
         from: Term.t;
       }
-    | Orient_eqn of {
-        eqn: Term.t; (* eqn [l=r] true in the trail *)
+    | Eq_propagate of {
+        guard: guard; (* eqn [l=r] true in the trail because [guard] is true *)
       }
-    | Transitivity of {
-        eqn1: Term.t;
-        eqn2: Term.t;
-      } 
   type op = Assignment.op =
-    | Make_eq of { l: Term.t; r: Term.t; }
+    | Make_eq of { l: Term.t; r: Term.t; guard: guard; }
     | Assign of { t: Term.t; value: Value.t; }
   type t = {
     env: Env.t;
@@ -355,7 +363,6 @@ end = struct
         next: t;
         level: int;
       }
-
 
   let env self = self.env
   let pop self = match self.stack with
@@ -374,8 +381,7 @@ end = struct
     let env = next.env in
     let level = match kind with
       | Decision -> 1 + level next
-      | BCP _ | Orient_eqn _ | Assign_propagate _
-      | Transitivity _ | Eval _ -> level next
+      | BCP _ | Eq_propagate _ | Assign_propagate _ | Eval _ -> level next
     and _assign = lazy (
       let a = assign next in
       Assignment.add_op op a
@@ -399,8 +405,8 @@ end = struct
       if Term.sign t then t, value else Term.not_ t, Value.not_ value in
     cons kind (Assign {t; value}) next
 
-  let cons_rw kind (l:Term.t) (r:Term.t) next : t =
-    cons kind (Make_eq {l;r}) next
+  let cons_rw kind (l:Term.t) (r:Term.t) ~guard next : t =
+    cons kind (Make_eq {l;r;guard}) next
 
   let unit_true = Clause.of_list [Term.true_] (* axiom: [true] *)
   let empty env =
@@ -417,7 +423,7 @@ end = struct
     | Cons r ->
       let op = match r.op with
         | Op.Assign {t;value} -> Op.Assign {t=f t; value}
-        | Op.Make_eq {l;r} -> Op.Make_eq {l=f l; r=f r}
+        | Op.Make_eq {l;r;guard} -> Op.Make_eq {l=f l; r=f r; guard=List.map f guard}
       in
       Cons {r with next=map f r.next; op; }
 
@@ -429,16 +435,23 @@ end = struct
 
   let to_iter (tr:t) : (kind * int * op) Iter.t = fun k -> iter k tr
   let iter_terms (tr:t) : Term.t Iter.t =
+    to_iter tr |> Iter.flat_map (fun (_,_,op) -> Op.iter_terms op)
+  let iter_lhs (tr:t) : Term.t Iter.t =
     to_iter tr |> Iter.map (fun (_,_,op) -> Op.lhs op)
   let iter_ops (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
   let length tr = to_iter tr |> Iter.length
   let n_decisions tr = to_iter tr |> Iter.filter (fun (k,_,_) -> k=Decision) |> Iter.length
 
+  let rec prefix_0 self : t = match self.stack with
+    | Nil -> self
+    | Cons {level=0;_} -> self
+    | Cons {next;_} -> prefix_0 next
+
   let pp_trail_elt out (k,level,op) =
     let cause = match k with
       | Decision -> "*" | BCP _ -> ""
-      | Eval _ -> "$" | Orient_eqn _ -> "=_>"
-      | Transitivity _ -> "=^*" | Assign_propagate _ -> "<-=" in
+      | Eval _ -> "$" | Eq_propagate _ -> "=="
+      | Assign_propagate _ -> "<-=" in
     Fmt.fprintf out "@[<h>[%d%s]%a@]" level cause Op.pp op
 
   let pp_kind out = function
@@ -448,11 +461,8 @@ end = struct
     | Assign_propagate {guard; from} ->
       Fmt.fprintf out "(@[assign-propagate@ :eq-to %a@ :guard %a@])"
         Term.pp from (Fmt.Dump.list Term.pp) guard
-    | Orient_eqn {eqn} ->
-      Fmt.fprintf out "(@[orient-eqn@ %a@])" Term.pp eqn
-    | Transitivity {eqn1; eqn2} ->
-      Fmt.fprintf out "(@[transitivity@ :eqn1 %a@ :eqn2 %a@])"
-        Term.pp eqn1 Term.pp eqn2
+    | Eq_propagate {guard} ->
+      Fmt.fprintf out "(@[eq-propagate@ %a@])" (Fmt.Dump.list Term.pp) guard
 
   let pp out (self:t) : unit =
     Fmt.fprintf out "(@[<v>%a@])" (pp_iter pp_trail_elt) (to_iter self)
@@ -520,20 +530,25 @@ module State = struct
   let compute_uf_domain trail : uf_domain Term.Map.t =
     let ass = Trail.assign trail in
     let is_ass x = Assignment.can_eval ass x in
+    let check_eq a b value =
+      match value with
+      | Value.Bool bool when is_ass a && not (is_ass b) ->
+        let value = Assignment.eval_exn ass a in
+        Some (Term.eq a b, b, if bool then `Forced value else `Forbid value)
+      | Value.Bool bool when is_ass b && not (is_ass a) ->
+        let value = Assignment.eval_exn ass b in
+        Some (Term.eq a b, a, if bool then `Forced value else `Forbid value)
+      | _ -> None
+    in
     (* pairs of impossible assignments *)
     let pairs : (Term.t * Term.t * _) list =
       Trail.iter_ops trail
       |> Iter.filter_map
         (function
-          | Op.Make_eq _ -> None
+          | Op.Make_eq {l;r} -> check_eq l r Value.true_
           | Op.Assign {t; value} ->
-            begin match Term.view t, value with
-              | Term.Eq (a,b), Value.Bool bool when is_ass a && not (is_ass b) ->
-                let value = Assignment.eval_exn ass a in
-                Some (t, b, if bool then `Forced value else `Forbid value)
-              | Term.Eq (a,b), Value.Bool bool when is_ass b && not (is_ass a) ->
-                let value = Assignment.eval_exn ass b in
-                Some (t, a, if bool then `Forced value else `Forbid value)
+            begin match Term.view t with
+              | Term.Eq (a,b) -> check_eq a b value
               | _ -> None
             end)
       |> Iter.to_rev_list
@@ -591,15 +606,17 @@ module State = struct
   (* main constructor *)
   let make (env:Env.t) (cs:Clause.Set.t) (trail:Trail.t) (subst:subst) status : t =
     let _all_vars = lazy (
-      Iter.(
-        Clause.Set.to_seq cs
-        |> flat_map Clause.lits |> flat_map Term.sub_all |> map Term.abs)
-      |> Term.Set.of_seq;
+      let ts_cs = Clause.Set.to_seq cs |> Iter.flat_map Clause.lits
+      and ts_trail = Trail.iter_terms trail in
+      (Iter.append ts_cs ts_trail)
+      |> Iter.flat_map Term.sub_relevant |> Iter.map Term.abs
+      |> Term.Set.of_seq
     ) in
     let _to_decide = lazy (
+      (* decide all relevant terms, minus the ones assigned already *)
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(Trail.iter_terms trail |> map Term.abs) |> Term.Set.of_seq in
+        Iter.(Trail.iter_lhs trail |> map Term.abs) |> Term.Set.of_seq in
       Term.Set.diff all in_trail
     ) in
     let _uf_sigs = lazy (compute_uf_sigs trail) in
@@ -717,30 +734,14 @@ module State = struct
     in
     if !matched then Some c' else None
 
-  (* turn [t[if a b c]] into [t[u] & a=>u=b & ¬a => u=c] *)
-  let remove_ifs (self:t) : _ ATS.step option =
-    let vars = all_vars self in
-    let as_if t = match Term.view t with
-      | If (a,b,c) -> Some (t,(a,b,c))
-      | _ -> None
-    in
-    match Term.Set.to_seq vars |> Iter.find_map as_if with
-    | None -> None
-    | Some (t,(a,b,c)) ->
-      let id = ID.makef "_if_%d" (Term.Map.cardinal self.subst) in
-      let u = Term.const @@ Var.make id (Term.ty t) in
-      let subst = Term.Map.add t u self.subst in
-      let trail = Trail.map (Term.replace ~old:t ~by:u) self.trail in
-      let c1 = Clause.of_list [Term.not_ a; Term.eq u b] in
-      let c2 = Clause.of_list [a; Term.eq u c] in
-      let cs =
-        Clause.Set.add c1 @@
-        Clause.Set.add c2 @@
-        Clause.Set.map (Clause.replace ~old:t ~by:u) self.cs
-      in
-      let expl = Fmt.sprintf "lift-ite %a@ into %a" Term.pp t Term.pp u in
-      let st' = lazy (make self.env cs trail subst Searching) in
-      Some (ATS.One (st', false, expl))
+  (* find a literal in [c] that is assigned to [false] at level 0 *)
+  let find_level_0_ (self:t) (c:Clause.t) : Term.t option =
+    let ass0 = Trail.assign @@ Trail.prefix_0 self.trail in
+    Clause.lits c
+    |> Iter.find_pred
+      (fun t -> match Assignment.eval ass0 t with
+         | Some (Value.Bool false) -> true
+         | _ -> false)
 
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
@@ -752,32 +753,37 @@ module State = struct
       Some (One (lazy (update self ~status:(Conflict_bool c)), false, "remove false"))
     | Conflict_bool c ->
       let ass = Trail.assign self.trail in
-      begin match Trail.pop self.trail with
-        | None -> Some (Error "empty trail") (* should not happen *)
-        | Some ((Eval _ | Decision | BCP _ | Assign_propagate _) as k,
+      begin match find_level_0_ self c, Trail.pop self.trail with
+        | Some lit, _ ->
+          (* remove lit from level 0 *)
+          let expl = Fmt.sprintf "resolve-level-0 on `@[¬%a@]`" Term.pp lit in
+          let res = Clause.remove lit c in
+          Some (One (lazy (update self ~status:(Conflict_bool res)), false, expl))
+        | None, None -> Some (Error "empty trail") (* should not happen *)
+        | None, Some ((Eval _ | Decision | BCP _ | Assign_propagate _) as k,
                 (Op.Make_eq _ as op), _) ->
           Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
-        | Some ((Orient_eqn _ | Transitivity _) as k, (Op.Assign _ as op), _) ->
+        | None, Some ((Eq_propagate _) as k, (Op.Assign _ as op), _) ->
           Util.errorf "%a can't be justified by %a" Op.pp op Trail.pp_kind k
-        | Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
+        | None, Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
           (* resolution *)
           assert (Clause.contains (Term.not_ lit) d);
           let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
           let expl = Fmt.sprintf "resolve on `@[¬%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
-        | Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
+        | None, Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
           let expl = Fmt.sprintf "resolve on `@[%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
-        | Some (BCP _, op, next) ->
+        | None, Some (BCP _, op, next) ->
           let expl = Fmt.sprintf "consume-bcp %a" Term.pp (Op.lhs op) in
           Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
-        | Some (Eval _, (Op.Assign _ as op), next) ->
+        | None, Some (Eval _, (Op.Assign _ as op), next) ->
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
           Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
-        | Some (Assign_propagate {guard; from}, Op.Assign {t; value=_}, next) ->
+        | None, Some (Assign_propagate {guard; from}, Op.Assign {t; value=_}, next) ->
           (* find lits of [c] evaluating to [false] because of [t],
              replace with [from] and add [¬eqn] as guard,
              otherwise just consume.
@@ -788,7 +794,7 @@ module State = struct
           begin match rw_in_clause_if_evals_to_false ass ~l:t ~r:from c with
             | Some c' ->
               let c' = Clause.add_l (List.map Term.not_ guard) c' in
-              let expl = Fmt.sprintf "paramod-assign @[%a --> %a@]@ :eqn %a@ :into %a"
+              let expl = Fmt.sprintf "paramod-assign-prop @[%a --> %a@]@ :guard %a@ :into %a"
                   Term.pp t Term.pp from (Fmt.Dump.list Term.pp) guard Clause.pp c' in
               Some (One (lazy (update self ~trail:next ~status:(Conflict_bool c')), false, expl))
             | None ->
@@ -798,40 +804,25 @@ module State = struct
               in
               Some (One (lazy (update self ~trail:next), false, expl))
           end
-        | Some (Orient_eqn {eqn}, Op.Make_eq {l;r}, next) ->
+        | None, Some (Eq_propagate {guard}, Op.Make_eq {l;r}, next) ->
           (* find lits of [c] evaluating to [false] because of [l],
-             replace with [r] and add [¬eqn] as guard,
+             replace with [r] and add [¬guard] as guard,
              otherwise just consume *)
-          Format.printf "@[<2>try to rw %a@ into %a@ in %a@ via orient-eqn %a@]@."
-            Term.pp l Term.pp r Clause.pp c Term.pp eqn;
+          Format.printf "@[<2>try to rw %a@ into %a@ in %a@ via eq-propagate %a@]@."
+            Term.pp l Term.pp r Clause.pp c (Fmt.Dump.list Term.pp) guard;
           begin match rw_in_clause_if_evals_to_false ass ~l ~r c with
             | Some c' ->
-              let c' = Clause.add (Term.not_ eqn) c' in
-              let expl = Fmt.sprintf "paramod-orient-rw @[%a --> %a@]@ :eqn %a@ :into %a"
-                  Term.pp l Term.pp r Term.pp eqn Clause.pp c' in
+              let c' = Clause.add_l (List.map Term.not_ guard) c' in
+              let expl = Fmt.sprintf "paramod-eq-rw @[%a --> %a@]@ :guard %a@ :into %a"
+                  Term.pp l Term.pp r (Fmt.Dump.list Term.pp) guard Clause.pp c' in
               Some (One (lazy (update self ~trail:next ~status:(Conflict_bool c')), false, expl))
             | None ->
               let expl =
-                Fmt.sprintf "consume-orient-rw %a@ :eqn %a" Term.pp l Term.pp eqn in
+                Fmt.sprintf "consume-eq-rw %a@ :guard %a"
+                  Term.pp l (Fmt.Dump.list Term.pp) guard in
               Some (One (lazy (update self ~trail:next), false, expl))
           end
-        | Some (Transitivity {eqn1;eqn2}, Op.Make_eq {l;r}, next) ->
-          (* find lits of [c] evaluating to [false] because of [l],
-             replace with [r] and add [¬eqn1 or ¬eqn2] as guard,
-             otherwise just consume *)
-          begin match rw_in_clause_if_evals_to_false ass ~l ~r c with
-            | Some c' ->
-              let c' = c' |> Clause.add (Term.not_ eqn1) |> Clause.add (Term.not_ eqn2) in
-              let expl = Fmt.sprintf "paramod-trans @[%a --> %a@]@ :eqn1 %a@ :eqn2 %a@ :into %a"
-                  Term.pp l Term.pp r Term.pp eqn1 Term.pp eqn2 Clause.pp c' in
-              Some (One (lazy (update self ~trail:next ~status:(Conflict_bool c')), false, expl))
-            | None ->
-              let expl =
-                Fmt.sprintf "consume-trans %a@ :eqn1 %a@ :eqn2 %a"
-                  Term.pp l Term.pp eqn1 Term.pp eqn2 in
-              Some (One (lazy (update self ~trail:next), false, expl))
-          end
-        | Some (Decision, Op.Assign {t;_}, next) ->
+        | None, Some (Decision, Op.Assign {t;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
@@ -902,34 +893,70 @@ module State = struct
             Some (ATS.One (lazy (update self ~trail ~status:Searching), false, expl))
           | _ -> None)
 
+  (* propagate [if a b c=b] or [if a b c=c] when [a] has a value *)
+  let rewrite_if self : _ ATS.step option =
+    let ass = Trail.assign self.trail in
+    let has_ass t = Assignment.can_eval ass t in
+    let get_ass t = Assignment.eval_exn ass t in
+    let vars = all_vars self in
+    let as_if t = match Term.view t with
+      | If (a,b,c) -> Some (t,(a,b,c))
+      | _ -> None
+    in
+    match Term.Set.to_seq vars |> Iter.find_map as_if with
+    | Some (t,(a,b,c)) when
+        has_ass a && not (has_ass t) && not (Assignment.can_rw ass t) ->
+      (* propagate [t=b] or [t=c] *)
+      let guard, val_a = match get_ass a with
+        | Value.Bool true -> [a], true
+        | Value.Bool false -> [Term.not_ a], false
+        | v ->
+          Util.errorf "term %a@ should have a bool value, not %a"
+            Term.pp a Value.pp v
+      in
+      let rhs = if val_a then b else c in
+      let trail = Trail.cons_rw (Trail.Eq_propagate {guard}) t rhs ~guard self.trail in
+      let expl =
+        Fmt.sprintf "rewrite_if %a@ :into %a@ :guard %a"
+          Term.pp t Term.pp rhs (Fmt.Dump.list Term.pp) guard in
+      let st' = lazy (update self ~trail ~status:Searching) in
+      Some (One (st', false, expl))
+    | _ -> None
+
   (* find [a = b] where [b <- v] and [a] not assigned, and add [a <- v] *)
   let eq_assign_propagate self : _ ATS.step option =
     let ass = Trail.assign self.trail in
     let has_ass t = Assignment.can_eval ass t in
     let get_ass t = Assignment.eval_exn ass t in
+    (* see if [a=b] qualifies for propagation *)
+    let check_eq a b ~guard =
+      if not (has_ass a) && has_ass b then (
+        let v = get_ass b in
+        let expl =
+          Fmt.asprintf "assign %a to %a by =<- %a"
+            Term.pp a Value.pp v Term.pp b
+        and kind = Trail.Assign_propagate {from=b; guard} in
+        Some ((kind, a, v), expl)
+      ) else if has_ass a && not (has_ass b) then (
+        let v = get_ass a in
+        let expl =
+          Fmt.asprintf "assign %a to %a by =<- %a"
+            Term.pp b Value.pp v Term.pp a
+        and kind = Trail.Assign_propagate {from=a; guard} in
+        Some ((kind, b, v), expl)
+      ) else None
+    in
     let ops =
       Trail.iter_ops self.trail
       |> Iter.filter_map
         (function
+          | Op.Make_eq {l;r;guard} -> check_eq l r ~guard
           | Op.Assign {t; value=Value.Bool true} ->
             begin match Term.view t with
-              | Term.Eq (a,b) when not (has_ass a) && has_ass b ->
-                let v = get_ass b in
-                let expl =
-                  Fmt.asprintf "assign %a to %a by =<- %a"
-                    Term.pp a Value.pp v Term.pp b
-                and kind = Trail.Assign_propagate {from=b; guard=[t]} in
-                Some ((kind, a, v), expl)
-              | Term.Eq (a,b) when has_ass a && not (has_ass b) ->
-                let v = get_ass a in
-                let expl =
-                  Fmt.asprintf "assign %a to %a by =<- %a"
-                    Term.pp b Value.pp v Term.pp a
-                and kind = Trail.Assign_propagate {from=a; guard=[t]} in
-                Some ((kind, b, v), expl)
+              | Term.Eq (a,b) -> check_eq a b ~guard:[t]
               | _ -> None
             end
-          | _ -> None)
+          | Op.Assign _ -> None)
       |> Iter.to_rev_list
     in
     match ops with
@@ -1335,13 +1362,12 @@ module State = struct
 
   let rules : _ ATS.rule list list = [
     [is_done];
-    [if_searching remove_ifs;];
     [resolve_bool_conflict_; solve_uf_domain_conflict;];
     [if_searching find_false_clause;
     ];
     [if_searching propagate];
     [if_searching eq_assign_propagate; if_searching eq_assign_congruence];
-    [if_searching rw_assign];
+    [if_searching rw_assign; if_searching rewrite_if];
     [
       if_searching find_uf_domain_conflict;
       if_searching find_congruence_conflict;

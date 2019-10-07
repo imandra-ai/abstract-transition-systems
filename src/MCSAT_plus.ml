@@ -191,6 +191,9 @@ module Trail : sig
   val n_decisions : t -> int
   val map : (Term.t -> Term.t) -> t -> t
 
+  val prefix_0 : t -> t
+  (** Prefix of the trail of level 0 *)
+
   val empty : Env.t -> t
   val level : t -> int
   val cons : kind -> op -> t -> t
@@ -291,6 +294,11 @@ end = struct
   let iter_ops (tr:t) : op Iter.t = to_iter tr |> Iter.map (fun (_,_,op) -> op)
   let length tr = to_iter tr |> Iter.length
   let n_decisions tr = to_iter tr |> Iter.filter (fun (k,_,_) -> k=Decision) |> Iter.length
+
+  let rec prefix_0 self : t = match self.stack with
+    | Nil -> self
+    | Cons {level=0;_} -> self
+    | Cons {next;_} -> prefix_0 next
 
   let pp_trail_elt out (k,level,op) =
     let cause = match k with
@@ -585,6 +593,15 @@ module State = struct
       let st' = lazy (make self.env cs trail subst Searching) in
       Some (ATS.One (st', false, expl))
 
+  (* find a literal in [c] that is assigned to [false] at level 0 *)
+  let find_level_0_ (self:t) (c:Clause.t) : Term.t option =
+    let ass0 = Trail.assign @@ Trail.prefix_0 self.trail in
+    Clause.lits c
+    |> Iter.find_pred
+      (fun t -> match Assignment.eval ass0 t with
+         | Some (Value.Bool false) -> true
+         | _ -> false)
+
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
@@ -595,27 +612,32 @@ module State = struct
       Some (One (lazy (update self ~status:(Conflict_bool c)), false, "remove false"))
     | Conflict_bool c ->
       let ass = Trail.assign self.trail in
-      begin match Trail.pop self.trail with
-        | None -> Some (Error "empty trail") (* should not happen *)
-        | Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
+      begin match find_level_0_ self c, Trail.pop self.trail with
+        | Some lit, _ ->
+          (* remove lit from level 0 *)
+          let expl = Fmt.sprintf "resolve-level-0 on `@[¬%a@]`" Term.pp lit in
+          let res = Clause.remove lit c in
+          Some (One (lazy (update self ~status:(Conflict_bool res)), false, expl))
+        | None, None -> Some (Error "empty trail") (* should not happen *)
+        | None, Some (BCP d, Op.Assign {t=lit;value=Value.Bool false}, next) ->
           (* resolution *)
           assert (Clause.contains (Term.not_ lit) d);
           let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
           let expl = Fmt.sprintf "resolve on `@[¬%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
-        | Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
+        | None, Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
           let expl = Fmt.sprintf "resolve on `@[%a@]`@ with %a" Term.pp lit Clause.pp d in
           Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
-        | Some (BCP _, op, next) ->
+        | None, Some (BCP _, op, next) ->
           let expl = Fmt.sprintf "consume-bcp %a" Term.pp (Op.lhs op) in
           Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
-        | Some (Eval _, (Op.Assign _ as op), next) ->
+        | None, Some (Eval _, (Op.Assign _ as op), next) ->
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
           Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
-        | Some (Assign_propagate {guard; from}, Op.Assign {t; value=_}, next) ->
+        | None, Some (Assign_propagate {guard; from}, Op.Assign {t; value=_}, next) ->
           (* find lits of [c] evaluating to [false] because of [t],
              replace with [from] and add [¬guard] as guard,
              otherwise just consume.
@@ -634,7 +656,7 @@ module State = struct
                   Term.pp t (Fmt.Dump.list Term.pp) guard in
               Some (One (lazy (update self ~trail:next), false, expl))
           end
-        | Some (Decision, Op.Assign {t;_}, next) ->
+        | None, Some (Decision, Op.Assign {t;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
