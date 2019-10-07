@@ -110,6 +110,7 @@ module Clause = struct
   let of_list = Term.Set.of_list
   let map f set =
     Term.Set.fold (fun x res -> Term.Set.add (f x) res) set Term.Set.empty
+  let replace ~old ~by c = map (Term.replace ~old ~by) c
 
   let as_unit c = match Term.Set.choose_opt c with
     | None -> None
@@ -188,6 +189,7 @@ module Trail : sig
   val assigned_vars : t -> Var.t list
   val length : t -> int
   val n_decisions : t -> int
+  val map : (Term.t -> Term.t) -> t -> t
 
   val empty : Env.t -> t
   val level : t -> int
@@ -268,6 +270,15 @@ end = struct
     } in
     cons_assign (BCP unit_true) Term.true_ Value.true_  e
 
+  let rec map f self = {self with stack=map_stack f self.stack}
+  and map_stack f self = match self with
+    | Nil -> Nil
+    | Cons r ->
+      let op = match r.op with
+        | Op.Assign {t;value} -> Op.Assign {t=f t; value}
+      in
+      Cons {r with next=map f r.next; op; }
+
   let rec iter k self = match self.stack with
     | Nil -> ()
     | Cons {kind;op;next;level;_} ->
@@ -327,6 +338,8 @@ module State = struct
     | Conflict_uf of conflict_uf
     | Searching
 
+  type subst = Term.t Term.Map.t
+
   type uf_domain =
     | UFD_forced of Value.t * Term.t
     | UFD_forbid of (Value.t * Term.t) list
@@ -337,6 +350,7 @@ module State = struct
     env: Env.t;
     cs: Clause.Set.t;
     trail: Trail.t;
+    subst: subst; (* global substitution*)
     status: status;
     _all_vars: Term.Set.t lazy_t;
     _to_decide: Term.Set.t lazy_t;
@@ -418,11 +432,11 @@ module State = struct
     |> SigMap.of_seq
 
   (* main constructor *)
-  let make (env:Env.t) (cs:Clause.Set.t) (trail:Trail.t) status : t =
+  let make (env:Env.t) (cs:Clause.Set.t) (trail:Trail.t) (subst:subst) status : t =
     let _all_vars = lazy (
       Iter.(
         Clause.Set.to_seq cs
-        |> flat_map Clause.lits |> flat_map Term.sub |> map Term.abs)
+        |> flat_map Clause.lits |> flat_map Term.sub_all |> map Term.abs)
       |> Term.Set.of_seq;
     ) in
     let _to_decide = lazy (
@@ -433,10 +447,19 @@ module State = struct
     ) in
     let _uf_sigs = lazy (compute_uf_sigs trail) in
     let _uf_domain = lazy (compute_uf_domain trail) in
-    { env; cs; trail; status; _all_vars; _to_decide; _uf_sigs; _uf_domain; }
+    { env; cs; trail; status; subst; _all_vars; _to_decide; _uf_sigs; _uf_domain; }
 
   let empty : t =
-    make Env.empty Clause.Set.empty (Trail.empty Env.empty) Searching
+    make Env.empty Clause.Set.empty (Trail.empty Env.empty) Term.Map.empty Searching
+
+  let update ?cs ?env ?trail ?subst ?status (self:t) : t =
+    let get_or x y = CCOpt.get_or ~default:x y in
+    let cs = get_or self.cs cs in
+    let env = get_or self.env env in
+    let trail = get_or self.trail trail in
+    let subst = get_or self.subst subst in
+    let status = get_or self.status status in
+    make env cs trail subst status
 
   let pp_conflict_uf out = function
     | CUF_forbid {t;v;lit_force;lit_forbid} ->
@@ -492,7 +515,7 @@ module State = struct
   let parse : t P.t =
     let open P.Infix in
     parse_rec Env.empty [] >|= fun (env,cs) ->
-    make env (Clause.Set.of_list cs) (Trail.empty env) Searching
+    make env (Clause.Set.of_list cs) (Trail.empty env) Term.Map.empty Searching
 
   (* ######### *)
 
@@ -504,6 +527,7 @@ module State = struct
       | _ when Term.equal t l -> Some r
       | Term.Bool _ -> None
       | Term.Not u -> CCOpt.map Term.not_ (rw_rec u)
+      | Term.If _ -> None (* TODO: should have been eliminated *)
       | Term.Eq (a, b) ->
         begin match Term.equal a l, Term.equal b l with
           | true, true -> Some (Term.eq r r) (* ?! *)
@@ -536,14 +560,39 @@ module State = struct
     in
     if !matched then Some c' else None
 
+  (* turn [t[if a b c]] into [t[u] & a=>u=b & ¬a => u=c] *)
+  let remove_ifs (self:t) : _ ATS.step option =
+    let vars = all_vars self in
+    let as_if t = match Term.view t with
+      | If (a,b,c) -> Some (t,(a,b,c))
+      | _ -> None
+    in
+    match Term.Set.to_seq vars |> Iter.find_map as_if with
+    | None -> None
+    | Some (t,(a,b,c)) ->
+      let id = ID.makef "_if_%d" (Term.Map.cardinal self.subst) in
+      let u = Term.const @@ Var.make id (Term.ty t) in
+      let subst = Term.Map.add t u self.subst in
+      let trail = Trail.map (Term.replace ~old:t ~by:u) self.trail in
+      let c1 = Clause.of_list [Term.not_ a; Term.eq u b] in
+      let c2 = Clause.of_list [a; Term.eq u c] in
+      let cs =
+        Clause.Set.add c1 @@
+        Clause.Set.add c2 @@
+        Clause.Set.map (Clause.replace ~old:t ~by:u) self.cs
+      in
+      let expl = Fmt.sprintf "lift-ite %a@ into %a" Term.pp t Term.pp u in
+      let st' = lazy (make self.env cs trail subst Searching) in
+      Some (ATS.One (st', false, expl))
+
   let resolve_bool_conflict_ (self:t) : _ ATS.step option =
     let open ATS in
     match self.status with
     | Conflict_bool c when Clause.is_empty c ->
-      Some (One (lazy (make self.env (Clause.Set.add c self.cs) self.trail Unsat), false, "learnt false"))
+      Some (One (lazy (update self ~cs:(Clause.Set.add c self.cs) ~status:Unsat), false, "learnt false"))
     | Conflict_bool c when Clause.mem Term.false_ c ->
       let c = Clause.remove Term.false_ c in
-      Some (One (lazy (make self.env self.cs self.trail (Conflict_bool c)), false, "remove false"))
+      Some (One (lazy (update self ~status:(Conflict_bool c)), false, "remove false"))
     | Conflict_bool c ->
       let ass = Trail.assign self.trail in
       begin match Trail.pop self.trail with
@@ -553,19 +602,19 @@ module State = struct
           assert (Clause.contains (Term.not_ lit) d);
           let res = Clause.union (Clause.remove (Term.not_ lit) d) (Clause.remove lit c) in
           let expl = Fmt.sprintf "resolve on `@[¬%a@]`@ with %a" Term.pp lit Clause.pp d in
-          Some (One (lazy (make self.env self.cs next (Conflict_bool res)), false, expl))
+          Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
         | Some (BCP d, Op.Assign{t=lit;_}, next) when Clause.contains (Term.not_ lit) c ->
           (* resolution *)
           assert (Clause.contains lit d);
           let res = Clause.union (Clause.remove lit d) (Clause.remove (Term.not_ lit) c) in
           let expl = Fmt.sprintf "resolve on `@[%a@]`@ with %a" Term.pp lit Clause.pp d in
-          Some (One (lazy (make self.env self.cs next (Conflict_bool res)), false, expl))
+          Some (One (lazy (update self ~trail:next ~status:(Conflict_bool res)), false, expl))
         | Some (BCP _, op, next) ->
           let expl = Fmt.sprintf "consume-bcp %a" Term.pp (Op.lhs op) in
-          Some (One (lazy (make self.env self.cs next self.status), false, expl))
+          Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
         | Some (Eval _, (Op.Assign _ as op), next) ->
           let expl = Fmt.sprintf "consume-eval %a" Term.pp (Op.lhs op) in
-          Some (One (lazy (make self.env self.cs next self.status), false, expl))
+          Some (One (lazy (update self ~trail:next ~status:self.status), false, expl))
         | Some (Assign_propagate {guard; from}, Op.Assign {t; value=_}, next) ->
           (* find lits of [c] evaluating to [false] because of [t],
              replace with [from] and add [¬guard] as guard,
@@ -578,23 +627,26 @@ module State = struct
               let c' = Clause.add_l (List.map Term.not_ guard) c' in
               let expl = Fmt.sprintf "paramod-assign @[%a --> %a@]@ :guard %a@ :into %a"
                   Term.pp t Term.pp from (Fmt.Dump.list Term.pp) guard Clause.pp c' in
-              Some (One (lazy (make self.env self.cs next (Conflict_bool c')), false, expl))
+              Some (One (lazy (update self ~trail:next ~status:(Conflict_bool c')), false, expl))
             | None ->
               let expl =
                 Fmt.sprintf "consume-assign-prop %a@ :guard %a"
                   Term.pp t (Fmt.Dump.list Term.pp) guard in
-              Some (One (lazy (make self.env self.cs next self.status), false, expl))
+              Some (One (lazy (update self ~trail:next), false, expl))
           end
         | Some (Decision, Op.Assign {t;_}, next) ->
           (* decision *)
           let c_reduced = Clause.filter_false (Trail.assign next) c in
           if Clause.is_empty c_reduced then (
             let expl = Fmt.sprintf "T-consume %a" Term.pp t in
-            Some (One (lazy (make self.env self.cs next (Conflict_bool c)), false, expl))
+            Some (One (lazy (update self ~trail:next ~status:(Conflict_bool c)), false, expl))
           ) else if Clause.length c_reduced=1 then (
             (* normal backjump *)
             let expl = Fmt.sprintf "backjump with learnt clause %a" Clause.pp c in
-            Some (One (lazy (make self.env (Clause.Set.add c self.cs) next Searching), false, expl))
+            let st' = lazy (
+              update self ~cs:(Clause.Set.add c self.cs) ~trail:next ~status:Searching
+            ) in
+            Some (One (st', false, expl))
           ) else (
             (* semantic case split *)
             assert (not (Term.is_bool t));
@@ -604,7 +656,10 @@ module State = struct
                 Clause.pp c Term.pp decision Clause.pp c_reduced
             in
             let trail = Trail.cons_assign Trail.Decision decision Value.true_ next in
-            Some (One (lazy (make self.env (Clause.Set.add c self.cs) trail Searching), true, expl))
+            let st' = lazy (
+              update self ~cs:(Clause.Set.add c self.cs) ~trail ~status:Searching
+            ) in
+            Some (One (st', true, expl))
           )
       end
     | _ -> None
@@ -625,7 +680,7 @@ module State = struct
     | Some (c,lit) ->
       let expl = Fmt.sprintf "@[<2>propagate %a@ from %a@]" Term.pp lit Clause.pp c in
       let trail = Trail.cons_assign (BCP c) lit Value.true_ self.trail in
-      Some (ATS.One (lazy (make self.env self.cs trail Searching), false, expl))
+      Some (ATS.One (lazy (update self ~trail ~status:Searching), false, expl))
     | None -> None
 
   (* find [a=b] where [a] and [b] are assigned *)
@@ -647,7 +702,7 @@ module State = struct
             in
             let trail = Trail.cons_assign (Trail.Eval [a;b]) t value self.trail in
             let expl = Fmt.asprintf "eval %a" Term.pp t in
-            Some (ATS.One (lazy (make self.env self.cs trail Searching), false, expl))
+            Some (ATS.One (lazy (update self ~trail ~status:Searching), false, expl))
           | _ -> None)
 
   (* find [a = b] where [b <- v] and [a] not assigned, and add [a <- v] *)
@@ -688,7 +743,7 @@ module State = struct
       let trail =
         List.fold_left (fun tr (k,t,v) -> Trail.cons_assign k t v tr) self.trail ops
       in
-      Some (ATS.One (lazy (make self.env self.cs trail Searching), false, expl))
+      Some (ATS.One (lazy (update self ~trail ~status:Searching), false, expl))
 
   (* find [f(t1…tn)] where [ti <- vi] and there is an entry [f(v1…vn) -> v]
      in the congruence table, and add [f(t1…tn) <- v] *)
@@ -734,14 +789,14 @@ module State = struct
       let trail =
         List.fold_left (fun tr (k,t,v) -> Trail.cons_assign k t v tr) self.trail ops
       in
-      Some (ATS.One (lazy (make self.env self.cs trail Searching), false, expl))
+      Some (ATS.One (lazy (update self ~trail ~status:Searching), false, expl))
 
   let decide self : _ ATS.step option =
     (* try to decide *)
     let vars = to_decide self in
     if Term.Set.is_empty vars then (
       (* full model, we're done! *)
-      Some (ATS.One (lazy (make self.env self.cs self.trail Sat), false, "all vars decided"))
+      Some (ATS.One (lazy (update self ~status:Sat), false, "all vars decided"))
     ) else (
       (* multiple possible decisions *)
       let decs =
@@ -751,9 +806,9 @@ module State = struct
              let mk_ v value =
                let w = if Term.is_bool x then 1 else Term.weight x in
                let st' = lazy (
-                 make self.env self.cs
-                   (Trail.cons_assign Decision v value self.trail)
-                   Searching)
+                 update self
+                   ~trail:(Trail.cons_assign Decision v value self.trail)
+                   ~status:Searching)
                in
                w, (st', true, Fmt.sprintf "decide %a <- %a" Term.pp v Value.pp value)
              in
@@ -791,7 +846,7 @@ module State = struct
     | None -> None
     | Some c ->
       (* conflict! *)
-      Some (ATS.One (lazy (make self.env self.cs self.trail (Conflict_bool c)), false, "false clause"))
+      Some (ATS.One (lazy (update self ~status:(Conflict_bool c)), false, "false clause"))
 
   let find_uf_domain_conflict (self:t) : _ option =
     let domain = uf_domain self in
@@ -811,11 +866,11 @@ module State = struct
     begin match l with
       | [] -> None
       | [t, c] ->
-        Some (ATS.One (lazy (make self.env self.cs self.trail c), false, mk_expl t))
+        Some (ATS.One (lazy (update self ~status:c), false, mk_expl t))
       | cs ->
         let choices =
           List.map
-            (fun (t,c) -> lazy (make self.env self.cs self.trail c), false, mk_expl t) cs
+            (fun (t,c) -> lazy (update self ~status:c), false, mk_expl t) cs
         in
         Some (ATS.Choice choices)
     end
@@ -848,11 +903,11 @@ module State = struct
     begin match l with
       | [] -> None
       | [t, c] ->
-        Some (ATS.One (lazy (make self.env self.cs self.trail c), false, mk_expl t))
+        Some (ATS.One (lazy (update self ~status:c), false, mk_expl t))
       | cs ->
         let choices =
           List.map
-            (fun (t,c) -> lazy (make self.env self.cs self.trail c), false, mk_expl t) cs
+            (fun (t,c) -> lazy (update self ~status:c), false, mk_expl t) cs
         in
         Some (ATS.Choice choices)
     end
@@ -915,7 +970,7 @@ module State = struct
       if not @@ Clause.is_empty reduced then (
         Util.errorf "bad lemma: %a@ reduced: %a" Clause.pp lemma Clause.pp reduced;
       );
-      Some (ATS.One (lazy (make self.env self.cs self.trail (Conflict_bool lemma)), false, expl))
+      Some (ATS.One (lazy (update self ~status:(Conflict_bool lemma)), false, expl))
 
   let if_searching f self = match self.status with
     | Searching -> f self
@@ -928,6 +983,7 @@ module State = struct
 
   let rules : _ ATS.rule list list = [
     [is_done];
+    [if_searching remove_ifs;];
     [resolve_bool_conflict_; solve_uf_domain_conflict;];
     [if_searching find_false_clause;
     ];

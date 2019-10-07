@@ -255,6 +255,7 @@ module Term : sig
     | Not of t
     | Eq of t * t
     | App of Var.t * t list
+    | If of t * t * t
 
   val view : t -> view
   val equal : t -> t -> bool
@@ -270,15 +271,27 @@ module Term : sig
   val app : Var.t -> t list -> t
   val eq : t -> t -> t
   val neq : t -> t -> t
+  val if_ : t -> t -> t -> t
   val not_ : t -> t
   val abs : t -> t
   val sign : t -> bool
 
-  val sub : t -> t Iter.t
+  val sub_all : t -> t Iter.t
+  (** All subterms *)
+
+  val sub_relevant : t -> t Iter.t
+  (** Same as {!sub_all}, but doesn't enter [if]'s branches *)
+
+  val map : f:(t -> t) -> t -> t
+
+  val replace : old:t -> by:t -> t -> t
+  (** [replace ~old ~by t] replaces [old] with [by] in [t], recursively *)
+
   val is_bool : t -> bool (** Has boolean type? *)
 
   val is_false : t -> bool
   val is_true : t -> bool
+  val is_if : t -> bool
 
   val pp : t Fmt.printer
 
@@ -299,6 +312,7 @@ end = struct
     | Not of t
     | Eq of t * t
     | App of Var.t * t list
+    | If of t * t * t
 
   let view t = t.view
   let ty t = t.ty
@@ -309,7 +323,7 @@ end = struct
 
   let is_bool t = Ty.is_bool (ty t)
 
-  let sub t k =
+  let sub_ ~kind t k =
     let rec aux t =
       k t;
       match view t with
@@ -317,7 +331,15 @@ end = struct
       | App (_, l) -> List.iter aux l
       | Eq (a,b) -> aux a; aux b
       | Not u -> aux u
+      | If (a,b,c) ->
+        begin match kind with
+          | `All -> aux a; aux b; aux c
+          | `Relevant -> aux a (* do not evaluate branches quite yet *)
+        end
     in aux t
+
+  let sub_all t k = sub_ ~kind:`All t k
+  let sub_relevant t k = sub_ ~kind:`Relevant t k
 
   module H = Hashcons.Make(struct
       type nonrec t = t
@@ -326,7 +348,8 @@ end = struct
         | Not a, Not b -> equal a b
         | Eq (a1,a2), Eq (b1,b2) -> equal a1 b1 && equal a2 b2
         | App (f1,l1), App (f2,l2) -> Var.equal f1 f2 && CCList.equal equal l1 l2
-        | (Bool _ | Not _ | Eq _ | App _), _ -> false
+        | If (a1,b1,c1), If (a2,b2,c2) -> equal a1 a2 && equal b1 b2 && equal c1 c2
+        | (Bool _ | Not _ | Eq _ | App _ | If _), _ -> false
 
       let hash t =
         let module H = CCHash in
@@ -335,6 +358,7 @@ end = struct
         | Not a -> H.combine2 20 (hash a)
         | Eq (a,b) -> H.combine3 30 (hash a) (hash b)
         | App (f, l) -> H.combine3 40 (Var.hash f) (H.list hash l)
+        | If (a,b,c) -> H.combine4 50 (hash a) (hash b) (hash c)
 
       let set_id t id = assert (t.id < 0); t.id <- id
     end)
@@ -346,6 +370,7 @@ end = struct
     | Not a -> Fmt.fprintf out "(@[not@ %a@])" pp a
     | App (f, []) -> Var.pp out f
     | App (f, l) -> Fmt.fprintf out "(@[%a@ %a@])" Var.pp f (Util.pp_list pp) l
+    | If (a,b,c) -> Fmt.fprintf out "(@[if %a@ %a@ %a@])" pp a pp b pp c
 
   let ty_of_view_ = function
     | Bool _ -> Ty.bool
@@ -359,6 +384,14 @@ end = struct
         Util.errorf "@[cannot compute negation of non-boolean@ %a@]" pp a;
       );
       Ty.bool
+    | If (a,b,c) ->
+      if not (Ty.equal (ty a) Ty.bool) then (
+        Util.errorf "cannot build if with test %a:@ not a boolean" pp a;
+      );
+      if not (Ty.equal (ty b) (ty c)) then (
+        Util.errorf "cannot build if with branches %a@ and %a:@ incompatible types" pp b pp c;
+      );
+      ty b
     | App (f, l) ->
       let args, ret = Ty.open_ (Var.ty f) in
       if List.length args <> List.length l then (
@@ -378,6 +411,7 @@ end = struct
     | Eq (a,b) -> 1 + weight a + weight b
     | Not a -> 1 + weight a
     | App (_f, l) -> List.fold_left (fun n t -> n+ weight t) 1 l
+    | If (a,b,c) -> 1 + weight a + weight b + weight c
 
   let mk_ : view -> t =
     let tbl = H.create ~size:256 () in
@@ -395,6 +429,7 @@ end = struct
   let false_ = bool false
   let app f l : t = mk_ (App (f, l))
   let const f = app f []
+  let if_ a b c : t = mk_ (If (a,b,c))
   let eq a b : t =
     if equal a b then true_
     else (
@@ -404,6 +439,7 @@ end = struct
 
   let is_false t = match t.view with Bool false -> true | _ -> false
   let is_true t = match t.view with Bool true -> true | _ -> false
+  let is_if t = match t.view with If _ -> true | _ -> false
 
   let not_ a = match view a with
     | Bool b -> bool (not b)
@@ -421,6 +457,21 @@ end = struct
     | Bool b -> b
     | Not _ -> false
     | _ -> true
+
+  let map ~f t : t =
+    match t.view with
+    | Bool _ -> t
+    | Not u -> not_ (f u)
+    | App (hd, l) -> app hd (List.map f l)
+    | If (a,b,c) -> if_ (f a) (f b) (f c)
+    | Eq (a,b) -> eq (f a) (f b)
+
+  let replace ~old ~by t : t =
+    let rec aux t =
+      if equal t old then by
+      else map t ~f:aux
+    in
+    aux t
 
   module As_key = struct type nonrec t = t let compare=compare let equal=equal let hash=hash end
 
@@ -440,6 +491,7 @@ end = struct
           ~list:(P.parsing "expr" @@ P.uncons P.string (function
               | "=" -> P.parsing "equality" (P.list2 self self) >|= fun (a,b) -> eq a b
               | "not" -> P.parsing "negation" (P.list1 self) >|= not_
+              | "if" -> P.parsing "if" (P.list3 self self self) >|= (fun (a,b,c) -> if_ a b c)
               | s ->
                 Var.parse_string env.Env.vars s >>= fun f ->
                 P.list self >|= fun l ->

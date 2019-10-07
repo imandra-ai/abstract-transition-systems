@@ -70,6 +70,16 @@ let list2 f1 f2 = function
     CCResult.(pure (fun x y -> x,y) <*> f1 x1 <*> f2 x2)
   | s -> err_ "expected binary list" s
 
+let list3 f1 f2 f3 = function
+  | `List [x1; x2; x3] ->
+    CCResult.(pure (fun x y z -> x,y,z) <*> f1 x1 <*> f2 x2 <*> f3 x3)
+  | s -> err_ "expected ternary list" s
+
+let list4 f1 f2 f3 f4 = function
+  | `List [x1; x2; x3; x4] ->
+    CCResult.(pure (fun x y z w -> x,y,z,w) <*> f1 x1 <*> f2 x2 <*> f3 x3 <*> f4 x4)
+  | s -> err_ "expected 4 elts list" s
+
 let is_nil = function `List [] -> Ok true | _ -> Ok false
 
 let rec fix f sexp = f (fix f) sexp

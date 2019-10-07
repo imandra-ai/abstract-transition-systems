@@ -16,6 +16,8 @@ val float : float t
 val string : string t
 val list1 : 'a t -> 'a t
 val list2 : 'a t -> 'b t -> ('a * 'b) t
+val list3 : 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
+val list4 : 'a t -> 'b t -> 'c t -> 'd t -> ('a * 'b * 'c * 'd) t
 val value : sexp t
 val list_value : sexp list t
 val list : 'a t -> 'a list t

@@ -1,0 +1,23 @@
+
+; see diamond2_cong, but using "if"
+; diamond based on congruence, not just transitivity
+(
+  (ty a)
+  (fun p0 bool)
+  (fun x0 a)
+  (fun y0 a)
+  (fun z0 a)
+  (fun p1 bool)
+  (fun x1 a)
+  (fun y1 a)
+  (fun z1 a)
+  (fun x2 a)
+  (fun f (-> a a))
+  (assert (not (= x2 (f (f x0)))))
+  (assert (= x1 (f y0)))
+  (assert (= x1 (f z0)))
+  (assert (= x0 (if p0 y0 z0)))
+  (assert (= x2 (f y1)))
+  (assert (= x2 (f z1)))
+  (assert (= x1 (if p1 y1 z1)))
+)
