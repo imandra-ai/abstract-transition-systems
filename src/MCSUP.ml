@@ -2,96 +2,6 @@ open Util
 
 include Smt_types_1
 
-(** Precedence on symbols *)
-module Precedence : sig
-  type t
-  val compare : t -> Var.t -> Var.t -> int
-
-  val to_iter : t -> Var.t Iter.t
-  val to_list : t -> Var.t list
-  val pp : t Fmt.printer
-  val to_string : t -> string
-  val length : t -> int
-
-  val complete : Var.t list -> Var.env -> t
-  (** [complete l1 env] makes a precedence where elements of [l1] are
-      the smallest ones (in that order), and remaining elements of [env] are bigger
-      than elements of [l1] but in some unspecified order. *)
-
-  val empty : Var.env -> t
-end = struct
-  type t = {
-    l: Var.t list;
-    m: int Var.Map.t lazy_t;
-  }
-
-  let mk_ (l:_ list) : t =
-    let m = lazy (
-      CCList.foldi (fun m i v -> Var.Map.add v i m) Var.Map.empty l
-      ) in
-    {l; m}
-
-  let to_list self = self.l
-  let to_iter self = CCList.to_seq self.l
-  let length self = List.length self.l
-
-  let pp out (self:t) =
-    Fmt.fprintf out "(@[%a@])" (Util.pp_iter ~sep:" <" Var.pp) (to_iter self)
-  let to_string = Fmt.to_string pp
-
-  let compare (self:t) v1 v2 : int =
-    let lazy m = self.m in
-    try CCInt.compare (Var.Map.find v1 m) (Var.Map.find v2 m)
-    with Not_found -> Util.errorf "precedence.compare %a, %a@ for %a" Var.pp v1 Var.pp v2 pp self
-
-  let complete l1 env : t =
-    (* find values of [env] not in [l1] *)
-    let l2 =
-      Var.Set.diff (Var.Set.of_seq @@ Str_map.values env) (Var.Set.of_list l1)
-      |> Var.Set.to_list
-    in
-    let l = l1 @ l2 in
-    mk_ l
-
-  let empty env : t = complete [] env
-end
-
-module KBO : sig
-  val compare : prec:Precedence.t -> Term.t -> Term.t -> int
-end = struct
-  let rec compare ~prec t1 t2 : int =
-    let self = compare ~prec in
-    if Term.equal t1 t2 then 0
-    else if Term.weight t1 > Term.weight t2 then 1
-    else if Term.weight t1 < Term.weight t2 then -1
-    else (
-      match Term.view t1, Term.view t2 with
-      | Bool b1, Bool b2 -> CCBool.compare b1 b2
-      | Bool _, _ -> -1
-      | _, Bool _ -> 1
-      | Eq (a1,b1), Eq (a2,b2) ->
-        if Term.equal a1 a2 then self b1 b2 else (
-          let r = self a1 a2 in
-          assert (r <> 0);
-          r
-        )
-      | Eq _, _ -> -1
-      | _, Eq _ -> 1
-      | Not a, Not b -> self a b
-      | Not _, _ -> -1
-      | _, Not _ -> 1
-      | App (f1, l1), App (f2,l2) ->
-        begin match Precedence.compare prec f1 f2 with
-          | 0 ->
-            assert (Var.equal f1 f2);
-            assert (List.length l1 = List.length l2);
-            CCList.compare self l1 l2
-          | n -> n
-        end
-      | If _, _ | _, If _ -> assert false (* TODO *)
-    )
-end
-
 module SigMap = CCMap.Make(struct
     type t = Var.t * Value.t list
     let compare (f1,l1) (f2,l2) =
@@ -321,7 +231,6 @@ module Trail : sig
 
   val env : t -> Env.t
   val pop : t -> (kind * op * t) option
-  val prec : t -> Precedence.t
   val assign : t -> Assignment.t
   val assigned_vars : t -> Var.t list
   val length : t -> int
@@ -361,7 +270,6 @@ end = struct
     env: Env.t;
     stack: stack;
     _assign: Assignment.t lazy_t; (* assignment from this trail *)
-    _prec: Precedence.t lazy_t;
     _assigned_vars: Var.t list; (* subset of unit variables assigned so far, top to bottom *)
   }
   and stack =
@@ -378,7 +286,6 @@ end = struct
     | Nil -> None
     | Cons {kind; op; next; _} -> Some (kind, op, next)
 
-  let[@inline] prec (self:t) = Lazy.force self._prec
   let[@inline] assign self = Lazy.force self._assign
   let[@inline] assigned_vars self = self._assigned_vars
   let[@inline] level self = match self.stack with
@@ -404,10 +311,7 @@ end = struct
           | App (f, []) -> f :: l
           | _ -> l
     in
-    let _prec = lazy (
-      Precedence.complete (List.rev _assigned_vars) env.Env.vars
-    ) in
-    {env; _assign; _prec; _assigned_vars; stack=Cons { kind; op; next; level; }}
+    {env; _assign; _assigned_vars; stack=Cons { kind; op; next; level; }}
 
   let cons_assign kind (t:Term.t) (value:Value.t) next : t =
     let t, value =
@@ -421,7 +325,6 @@ end = struct
   let empty env =
     let e = {
       env; stack=Nil; _assigned_vars=[];
-      _prec=lazy(Precedence.empty env.Env.vars);
       _assign=lazy Assignment.empty;
     } in
     cons_assign (BCP unit_true) Term.true_ Value.true_  e
@@ -667,10 +570,10 @@ module State = struct
   let pp out (self:t) : unit =
     Fmt.fprintf out
       "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs[%d]@ (@[<v>%a@])@]@ \
-       @[<2>:trail@ %a@]@ @[<2>:prec %a@]@ @[<2>:env@ %a@]@])"
+       @[<2>:trail@ %a@]@ @[<2>:env@ %a@]@])"
       pp_status self.status (Clause.Set.cardinal self.cs)
       (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
-      Trail.pp self.trail Precedence.pp (Trail.prec self.trail) Env.pp self.env
+      Trail.pp self.trail Env.pp self.env
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
     let open P in

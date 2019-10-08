@@ -363,7 +363,6 @@ module MCSUP = Make_calculus(struct
     let view (st:State.t) : Calculus_msg.t Vdom.vdom =
       let open Vdom in
       let status, cs, trail, env = State.view st in
-      let prec = Trail.prec trail in
       let a_status = match status with
         | Sat -> [color "green"; style "bold" "true"]
         | Unsat -> [color "red"; style "bold" "true"]
@@ -389,9 +388,6 @@ module MCSUP = Make_calculus(struct
           (Clause.Set.elements cs |> List.map (fun c -> pre_f "%a" Clause.pp c)
            |> div_class "ats-clauses"
         );
-        details ~short:(Fmt.sprintf "precedence (%d)" (Precedence.length prec))
-          ~a:[title_f "%a@." Precedence.pp prec]
-          (pre_f "@[<hv>%a@]" Precedence.pp prec);
         details ~short:(Fmt.sprintf "env (%d)" (Env.length env))
           ~a:[title_f "%a@." Env.pp env]
           (Env.to_iter env
