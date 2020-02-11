@@ -18,7 +18,7 @@ module Clause = struct
   let contains l c = Lit.Set.mem l c
   let remove l c : t = Lit.Set.remove l c
   let union = Lit.Set.union
-  let lits c = Lit.Set.to_seq c
+  let lits c = Lit.Set.to_iter c
   let for_all = Lit.Set.for_all
   let filter = Lit.Set.filter
   let of_list = Lit.Set.of_list
@@ -95,12 +95,12 @@ module State = struct
   (* main constructor *)
   let make (cs:Clause.t list) (trail:Trail.t) status : t =
     let _all_vars = lazy (
-      Iter.(of_list cs |> flat_map Clause.lits |> map Lit.abs) |> Lit.Set.of_seq;
+      Iter.(of_list cs |> flat_map Clause.lits |> map Lit.abs) |> Lit.Set.of_iter;
     ) in
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(Trail.to_iter trail |> map snd |> map Lit.abs) |> Lit.Set.of_seq in
+        Iter.(Trail.to_iter trail |> map snd |> map Lit.abs) |> Lit.Set.of_iter in
       Lit.Set.diff all in_trail
     ) in
     {cs; trail; status; _all_vars; _to_decide }
@@ -202,7 +202,7 @@ module State = struct
     ) else (
       (* multiple possible decisions *)
       let decs =
-        Lit.Set.to_seq vars
+        Lit.Set.to_iter vars
         |> Iter.flat_map_l
           (fun v ->
              let mk_ v =

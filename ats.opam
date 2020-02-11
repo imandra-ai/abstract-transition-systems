@@ -11,7 +11,7 @@ build: [
   ["dune" "runtest" "-p" name] {with-test}
 ]
 depends: [
-  "containers"
+  "containers" { >= "2.8" }
   "iter"
   "alcotest" {with-test}
 ]

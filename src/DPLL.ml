@@ -40,18 +40,18 @@ module State = struct
   (* main constructor *)
   let make cs trail status : t =
     let _all_vars = lazy (
-      Iter.(of_list cs |> flat_map of_list |> map Lit.abs) |> Lit.Set.of_seq;
+      Iter.(of_list cs |> flat_map of_list |> map Lit.abs) |> Lit.Set.of_iter;
     ) in
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(of_list trail |> map snd |> map Lit.abs) |> Lit.Set.of_seq in
+        Iter.(of_list trail |> map snd |> map Lit.abs) |> Lit.Set.of_iter in
       Lit.Set.diff all in_trail
     ) in
     let _assign = lazy (
       Iter.(of_list trail
             |> map snd |> flat_map_l (fun i -> [i, true; -i, false]))
-      |> Lit.Map.of_seq
+      |> Lit.Map.of_iter
     ) in
     {cs;trail;status;_all_vars; _to_decide; _assign}
 
@@ -124,7 +124,7 @@ module State = struct
     ) else (
       (* decisions, always positive *)
       let decs =
-        Lit.Set.to_seq vars
+        Lit.Set.to_iter vars
         |> Iter.map
           (fun v ->
              lazy (make self.cs ((Decision,v) :: self.trail) Searching), true,

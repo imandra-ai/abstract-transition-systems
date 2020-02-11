@@ -25,7 +25,7 @@ module Clause = struct
   let mem = Term.Set.mem
   let remove l c : t = Term.Set.remove l c
   let union = Term.Set.union
-  let lits c = Term.Set.to_seq c
+  let lits c = Term.Set.to_iter c
   let for_all = Term.Set.for_all
   let filter = Term.Set.filter
   let of_list = Term.Set.of_list
@@ -273,20 +273,20 @@ module State = struct
          | Term.App (f, l) when List.for_all is_ass l ->
            Some ((f, List.map (fun x->Term.Map.find x ass) l), (v,t))
          | _ -> None)
-    |> SigMap.of_seq
+    |> SigMap.of_iter
 
   (* main constructor *)
   let make (env:Env.t) (cs:Clause.Set.t) (trail:Trail.t) (subst:subst) status : t =
     let _all_vars = lazy (
       Iter.(
-        Clause.Set.to_seq cs
+        Clause.Set.to_iter cs
         |> flat_map Clause.lits |> flat_map Term.sub_all |> map Term.abs)
-      |> Term.Set.of_seq;
+      |> Term.Set.of_iter;
     ) in
     let _to_decide = lazy (
       let lazy all = _all_vars in
       let in_trail =
-        Iter.(Trail.iter_terms trail |> map Term.abs) |> Term.Set.of_seq in
+        Iter.(Trail.iter_terms trail |> map Term.abs) |> Term.Set.of_iter in
       Term.Set.diff all in_trail
     ) in
     let _uf_sigs = lazy (compute_uf_sigs trail) in
@@ -329,7 +329,7 @@ module State = struct
       "(@[<hv>st @[<2>:status@ %a@]@ @[<2>:cs[%d]@ (@[<v>%a@])@]@ \
        @[<2>:trail@ %a@]@ @[<2>:env@ %a@]@])"
       pp_status self.status (Clause.Set.cardinal self.cs)
-      (pp_iter Clause.pp) (Clause.Set.to_seq self.cs)
+      (pp_iter Clause.pp) (Clause.Set.to_iter self.cs)
       Trail.pp self.trail Env.pp self.env
 
   let parse_one (env:Env.t) (cs:Clause.t list) : (Env.t * Clause.t list) P.t =
@@ -369,7 +369,7 @@ module State = struct
       | If (a,b,c) -> Some (t,(a,b,c))
       | _ -> None
     in
-    match Term.Set.to_seq vars |> Iter.find_map as_if with
+    match Term.Set.to_iter vars |> Iter.find_map as_if with
     | None -> None
     | Some (t,(a,b,c)) ->
       let id = ID.makef "_if_%d" (Term.Map.cardinal self.subst) in
@@ -449,7 +449,7 @@ module State = struct
 
   let find_unit_c (self:t) : (Clause.t * Term.t) option =
     let assign = Trail.assign self.trail in
-    Clause.Set.to_seq self.cs
+    Clause.Set.to_iter self.cs
     |> Iter.find_map
       (fun c ->
          (* non-false lits *)
@@ -471,7 +471,7 @@ module State = struct
     let ass = Trail.assign self.trail in
     let has_ass t = Term.Map.mem t ass in
     all_vars self
-    |> Term.Set.to_seq
+    |> Term.Set.to_iter
     |> Iter.filter (fun t -> not @@ has_ass t)
     |> Iter.find_map
       (fun t ->
@@ -498,7 +498,7 @@ module State = struct
     ) else (
       (* multiple possible decisions *)
       let decs =
-        Term.Set.to_seq vars
+        Term.Set.to_iter vars
         |> Iter.flat_map_l
           (fun x ->
              let mk_ v value =
@@ -536,7 +536,7 @@ module State = struct
 
   let find_false_clause (self:t) : _ option =
     let ass = Trail.assign self.trail in
-    match Iter.find_pred (Clause.eval_to_false ass) (Clause.Set.to_seq self.cs) with
+    match Iter.find_pred (Clause.eval_to_false ass) (Clause.Set.to_iter self.cs) with
     | None -> None
     | Some c ->
       (* conflict! *)
@@ -545,7 +545,7 @@ module State = struct
   let find_uf_domain_conflict (self:t) : _ option =
     let domain = uf_domain self in
     let l =
-      Term.Map.to_seq domain
+      Term.Map.to_iter domain
       |> Iter.filter_map
           (fun (t,dom) ->
             match dom with
