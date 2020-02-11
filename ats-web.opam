@@ -14,7 +14,10 @@ depends: [
   "containers"
   "iter"
   "ats"
-  "ocaml-vdom"
+  "vdom"
+]
+pin-depends: [
+  ["vdom.dev" "git+https://github.com/LexiFi/ocaml-vdom.git"]
 ]
 tags: [ "sat" "smt" ]
 homepage: "https://github.com/aestheticintegration/abstract-transition-systems/"
