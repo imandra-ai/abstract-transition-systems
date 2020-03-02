@@ -397,6 +397,30 @@ module MCSUP = Make_calculus(struct
       ]
   end)
 
+module MCSAT_simple = Make_calculus(struct
+    module A = Ats.ATS.Make(Ats.MCSAT_simple.A)
+    open Ats.MCSAT_simple
+    open Calculus_msg
+
+    let kinds = [Ats_examples.K_smt]
+    let name = "mcsat_simple"
+    let view (st:State.t) : Calculus_msg.t Vdom.vdom =
+      let open Vdom in
+      let status, trail, cs = State.view st in
+      div_class "ats-state" [
+        div_class "ats-status" [h_status "status: "; pre (Fmt.to_string State.pp_status status)];
+        details ~short:(Fmt.sprintf "trail (%d elts)" (Trail.length trail))
+          ~a:[title_f "@[<v>%a@]" Trail.pp trail]
+          (Trail.to_iter trail
+          |> Iter.map
+            (fun elt -> pre_trail (Fmt.to_string Trail.pp_trail_elt elt))
+          |> Iter.to_list |> div_class "ats-trail");
+        details ~short:(Fmt.sprintf "clauses (%d)" (List.length cs))
+          ~a:[title_f "@[<v>%a@]@." (Fmt.Dump.list Clause.pp) cs]
+          (List.map (fun c -> pre_f "%a" Clause.pp c) cs |> div_class "ats-clauses");
+      ]
+  end)
+
 module App = struct
   open Vdom
 
@@ -432,6 +456,7 @@ module App = struct
         (module MCSAT);
         (module MCSAT_plus);
         (module MCSUP);
+        (module MCSAT_simple);
       ]
 
   let init : model =
