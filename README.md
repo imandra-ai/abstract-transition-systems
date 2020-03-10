@@ -4,6 +4,8 @@ An implementation of several classic transition systems that describe
 algorithms for SAT or SMT. The purpose is to make it very easy to experiment
 with new calculi or variants of existing calculi.
 
+[online version](https://docs.imandra.ai/abstract-transition-systems/ats_web.html)
+
 - Calculi
   * [x] DPLL
   * [x] CDCL
