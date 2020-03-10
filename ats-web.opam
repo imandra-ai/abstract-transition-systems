@@ -17,7 +17,7 @@ depends: [
   "vdom"
 ]
 pin-depends: [
-  ["vdom.dev" "git+https://github.com/LexiFi/ocaml-vdom.git"]
+  ["vdom.dev" "git+https://github.com/LexiFi/ocaml-vdom.git#e847d8cf12951f9db6ead5edafac88ff220e6cff"]
 ]
 tags: [ "sat" "smt" ]
 homepage: "https://github.com/aestheticintegration/abstract-transition-systems/"
