@@ -6,7 +6,7 @@
  (js_of_ocaml
   (flags --opt 3 +gen_js_api/ojs_runtime.js))
  (flags :standard -warn-error -27-32-33 -no-check-prims)
- (libraries containers ats ocaml-vdom gen_js_api))
+ (libraries containers ats lwd brr-lwd))
 
 (rule
  (target ats_examples.ml)

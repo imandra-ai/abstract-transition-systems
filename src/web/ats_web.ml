@@ -1,5 +1,10 @@
 module Fmt = CCFormat
+module E = Brr_lwd.Elwd
+open Brr
+open Lwd_infix
+let spf = Printf.sprintf
 
+(*
 module Vdom = struct
   include Vdom
   let h2 ?a x = elt ?a "h2" [text x]
@@ -29,6 +34,7 @@ module Vdom = struct
     let a = if open_ then [str_prop "open" "true"] else [] in
     elt ~a "details" l
 end
+   *)
 
 module Calculus_msg = struct
   type t =
@@ -44,21 +50,21 @@ module type APP_CALCULUS = sig
   val name : string
 
   type msg = Calculus_msg.t
-  type model
+
   val kinds : Ats_examples.kind list
 
-  val parse : string -> (model, string) result
+  val view : E.t Lwd.t
+  (** Current view *)
 
-  val init : model
-  val view : model -> msg Vdom.vdom
-  val update : model -> msg -> (model, string) result
+  val parse : string -> (unit, string) result
+  (** Set model based on the given problem *)
 end
 
 module type CALCULUS = sig
   module A : Ats.ATS.S
   val name : string
   val kinds : Ats_examples.kind list
-  val view : A.State.t -> Calculus_msg.t Vdom.vdom
+  val view : A.State.t Lwd.t -> E.t Lwd.t
 end
 
 let help_multinext = "recursively follow deterministic transitions"
@@ -72,42 +78,188 @@ module Make_calculus(C : CALCULUS)
   open C.A
   open Calculus_msg
 
+  module LS = Lwd_seq.Balanced
+
   let kinds = C.kinds
   let name = C.name
 
   type transition_kind = TK_pick | TK_one
   type msg = Calculus_msg.t
-  type model = {
-    parents: (State.t * Ats.ATS.is_decision * transition_kind * string) list; (* parent states *)
-    st: State.t; (* current state *)
+
+  type parent = State.t * Ats.ATS.is_decision * transition_kind * string
+  type st = {
+    parents: parent LS.t; (* parent states *)
+    state: State.t; (* current state *)
     step: (State.t lazy_t * Ats.ATS.is_decision * string) Ats.ATS.step lazy_t;
   }
 
-  let init =
-    let st = State.empty in
-    { st; parents=[]; step=lazy Ats.ATS.Done; }
+  let st: st Lwd.var = Lwd.var {
+    parents=LS.empty;
+    state=State.empty;
+    step=lazy Ats.ATS.Done;
+  }
 
-  let mk_ parents (st:State.t) =
-    { st; parents; step=lazy (next st); }
+  let mk_ (state:State.t) ~parents : st =
+    { state; parents; step=lazy (C.A.next state) }
 
+  let set_state_ (state:State.t) ~parents : unit =
+    Lwd.set st (mk_ state ~parents)
+
+  (* init from string *)
   let parse (s:string) : _ result =
     match Ats.Sexp_parser.parse_string_str State.parse s with
     | Error msg -> Error msg
-    | Ok st -> Ok (mk_ [] st)
+    | Ok state -> set_state_ state ~parents:LS.empty; Ok ()
 
-  let view_ (m: model) : _ Vdom.vdom =
-    let open Vdom in
-    let v_actions_pre, v_actions_post =
-      match Lazy.force m.step with
-      | Ats.ATS.Done -> [], []
-      | Ats.ATS.Error msg ->
-        [button ~cls:"ats-button" ~a:[title help_step] "step" M_step;
-         button ~cls:"ats-button" ~a:[title_f "error: %s" msg] "next" M_next],
-        []
-      | Ats.ATS.One (_,_,expl) ->
-        [button ~cls:"ats-button" ~a:[title help_step] "step" M_step;
-         button ~cls:"ats-button" ~a:[title expl] "next" M_next;
-         button ~cls:"ats-button" ~a:[title help_multinext] "next*" M_multi_next], []
+  let (^^) mk s = mk @@ Jstr.v s
+
+  let lcons_ x l = LS.concat (LS.element x) l
+  let rec lfirst_ (l:_ LS.t) =
+    match LS.view l with
+    | Lwd_seq.Empty -> None
+    | Lwd_seq.Element x -> Some x
+    | Lwd_seq.Concat (a,b) ->
+      match lfirst_ a with Some _ as res -> res | None -> lfirst_ b
+
+  (* drop n0 elements from the front of [l] *)
+  let ldrop_ n0 l : _ LS.t =
+    assert (n0 >= 0);
+    let rec loop n (l:_ LS.t) =
+      if n=0 then l, 0
+      else (
+        match LS.view l with
+        | Lwd_seq.Empty -> LS.empty, n
+        | Lwd_seq.Element _ -> LS.empty, n-1
+        | Lwd_seq.Concat (a,b) ->
+          let a, n = loop n a in
+          if n=0 then LS.concat a b, n
+          else loop n b
+      )
+    in
+    fst @@ loop n0 l
+
+  let do_step_ (st:st) : (st, _) result =
+    let {parents; state; step} = st in
+    match Lazy.force step with
+    | Ats.ATS.Done -> Error "done"
+    | Ats.ATS.Error msg -> Error msg
+    | Ats.ATS.One (lazy state',is_dec,expl) ->
+      Ok (mk_ state' ~parents:(lcons_ (state,is_dec,TK_one,expl) parents))
+    | Ats.ATS.Choice ((lazy st',is_dec,expl) :: _) ->
+      Ok (mk_ st' ~parents:(lcons_ (state,is_dec,TK_pick,expl) parents))
+    | Ats.ATS.Choice [] ->
+      assert false
+
+  let do_step () =
+    match do_step_ @@ Lwd.peek st with
+    | Ok s -> Lwd.set st s; Ok ()
+    | Error _ as e -> e
+
+  let do_auto n =
+    let rec loop n state =
+      match Lazy.force state.step with
+      | Done -> Lwd.set st state; Ok ()
+      | _ when n <= 0 -> Lwd.set st state; Ok ()
+      | _ ->
+        match do_step_ state with
+        | Error e -> Error e
+        | Ok state -> loop (n-1) state
+    in
+    loop n (Lwd.peek st)
+
+  let do_next () =
+    let {state; parents; step} = Lwd.peek st in
+    begin match Lazy.force step with
+      | Done  -> Error "done"
+      | Error msg -> Error msg
+      | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
+        set_state_ st' ~parents:(lcons_ (state,is_dec,TK_one,expl) parents);
+        Ok ()
+      | Choice _ ->
+        Error "need to make a choice"
+    end
+
+  (* follow any number of deterministic transitions *)
+  let do_multi_next m =
+    let rec loop state0 =
+      let {parents; state; step } = state0 in
+      match Lazy.force step with
+      | Error msg -> Error msg
+      | Done -> Lwd.set st state0; Ok ()
+      | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
+        loop (mk_ st' ~parents:(lcons_ (state,is_dec,TK_one,expl) parents))
+      | _ -> Lwd.set st state0; Ok ()
+    in
+    loop @@ Lwd.peek st
+
+  let pick i =
+    let {state; parents; step} = Lwd.peek st in
+    begin match Lazy.force step with
+      | Ats.ATS.Choice l ->
+        begin
+          try
+            let lazy st', is_dec, expl = List.nth l i in
+            set_state_ st' ~parents:(lcons_ (state,is_dec, TK_pick,expl) parents);
+            Ok ()
+          with _ -> Error "invalid `pick`"
+        end
+      | _ -> Error "cannot pick a state, not in a choice state"
+    end
+
+  let go_back i =
+    let {state; parents; step} = Lwd.peek st in
+    begin match Array.get (Lwd_seq.to_array (parents : _ LS.t :> _ Lwd_seq.t)) i with
+      | state, _, _, _expl ->
+        set_state_ state ~parents:(ldrop_ (i+1) parents);
+        Ok ()
+      | exception _ -> Error "invalid index in parents"
+    end
+
+  let btn ~at ~on_click (lbl:string) : E.t Lwd.t =
+    let$ b = E.button ~at [`P (El.txt' lbl)] in
+    Ev.listen Ev.click on_click (El.as_target b);
+    b
+
+  let view : E.t Lwd.t =
+    let err = Lwd.var None in
+    let unwrap_res_ = function
+      | Ok () -> Lwd.set err None
+      | Error e -> Lwd.set err (Some e)
+    in
+
+    let b_step =
+      btn
+        ~at:[`P (At.class' ^^ "ats-button");
+             `P (At.title ^^ help_step);
+            ] "step"
+        ~on_click:(fun _ -> do_step () |> unwrap_res_)
+    and b_multinext =
+      btn
+        ~at:[`P (At.class' ^^ "ats-button");
+             `P (At.title ^^ help_multinext);
+            ] "next*"
+        ~on_click:(fun _ -> do_multi_next () |> unwrap_res_)
+    in
+    let b_next msg =
+      btn
+        ~at:[`P (At.class' ^^ "ats-button");
+             `P (At.title ^^ msg);
+            ] "next"
+        ~on_click:(fun _ -> do_next () |> unwrap_res_)
+    in
+
+    let buttons () =
+      let$ {state; parents; step=lazy step} = Lwd.get st in
+      begin match step with
+        | Ats.ATS.Done -> []
+
+        | Ats.ATS.Error msg ->
+          [b_step;
+           (b_next @@ spf "error: %s" msg)
+          ]
+        | Ats.ATS.One (_,_,expl) ->
+          [b_step; b_next expl; b_multinext]
+
       | Ats.ATS.Choice l ->
         let choices =
           List.mapi
@@ -150,70 +302,6 @@ module Make_calculus(C : CALCULUS)
       v_actions_post;
       [div ~key:"ats-parents" @@ v_parents];
     ]
-
-  let view m = Vdom.memo view_ m
-
-  let do_step m =
-    let {parents; st; step } = m in
-    match Lazy.force step with
-    | Ats.ATS.Done -> Error "done"
-    | Ats.ATS.Error msg -> Error msg
-    | Ats.ATS.One (lazy st',is_dec,expl) ->
-      Ok (mk_ ((st,is_dec,TK_one,expl)::parents) st')
-    | Ats.ATS.Choice ((lazy st',is_dec,expl)::_) ->
-      Ok (mk_ ((st,is_dec,TK_pick,expl)::parents) st') (* make a choice *)
-    | Ats.ATS.Choice _ -> assert false
-
-  let rec do_auto n m =
-    match Lazy.force m.step with
-    | Done -> Ok m
-    | _ when n <= 0 -> Ok m
-    | _ ->
-      match do_step m with
-      | Error e -> Error e
-      | Ok m' -> do_auto (n-1) m'
-
-  (* follow any number of deterministic transitions *)
-  let rec do_multi_next m =
-    let {parents; st; step } = m in
-    match Lazy.force step with
-    | Error msg -> Error msg
-    | Done -> Ok m
-    | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
-      do_multi_next (mk_ ((st,is_dec,TK_one,expl) :: parents) st')
-    | _ -> Ok m
-
-  let update (m:model) (msg:msg) : _ result =
-    let {parents; st; step } = m in
-    match msg with
-    | M_next ->
-      begin match Lazy.force step with
-        | Done  -> Error "done"
-        | Error msg -> Error msg
-        | One (lazy st',is_dec,expl) | Choice [lazy st',is_dec,expl] ->
-          Ok (mk_ ((st,is_dec,TK_one,expl)::parents) st')
-        | Choice _ ->
-          Error "need to make a choice"
-      end
-    | M_multi_next -> do_multi_next m
-    | M_step -> do_step m
-    | M_auto n -> do_auto n m
-    | M_pick i ->
-      begin match Lazy.force step with
-        | Ats.ATS.Choice l ->
-          begin try
-              let lazy st', is_dec, expl = List.nth l i in
-              Ok (mk_ ((st,is_dec, TK_pick,expl)::parents) st')
-            with _ -> Error "invalid `pick`"
-          end
-        | _ -> Error "cannot pick a state, not in a choice state"
-      end
-    | M_go_back i ->
-      begin try
-          let st, _, _, _expl = List.nth parents i in
-          Ok (mk_ (CCList.drop (i+1) parents) st)
-        with _ -> Error "invalid index in parents"
-      end
 end
 
 let h_status ?(a=[]) x = Vdom.(h5 ~a:(class_ "ats-status"::a) x)
@@ -415,7 +503,7 @@ module App = struct
         app: (module APP_CALCULUS with type model = 'm);
         model: 'm;
       } -> logic_model
-      
+
   type model = {
     error: string option;
     parse: string;
