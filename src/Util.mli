@@ -1,5 +1,6 @@
 module Fmt = CCFormat
 module P = Sexp_parser
+module Option = CCOpt
 
 val quiet_ : bool ref
 

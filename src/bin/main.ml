@@ -37,27 +37,27 @@ module Make_cmd(A: ATS.S) = struct
 
   let parse_filename : string P.t =
     let open P in
-    (try_ (P.char '"') *> P.chars_if (fun c -> c <> '"') <* char '"')
+    ((P.char '"') *> P.chars_if (fun c -> c <> '"') <* char '"')
 
   (* command parser *)
   let parse1 : t P.t =
     let open P in
-    let int_or default = skip_white *> ((P.try_ U.int) <|> return default) in
+    let int_or default = skip_white *> (U.int <|> return default) in
     skip_white *> parsing "command" (
-      (try_ (string "quit") *> return Quit)
-      <|> (try_ (string "show") *> return Show)
-      <|> (try_ (string "auto") *> (int_or max_int >|= fun i -> Auto i))
-      <|> (try_ (string "step") *> return (Auto 1))
-      <|> (try_ (string "init") *> skip_white *>
+      (string "quit" *> return Quit)
+      <|> (string "show" *> return Show)
+      <|> (string "auto" *> (int_or max_int >|= fun i -> Auto i))
+      <|> (string "step" *> return (Auto 1))
+      <|> (string "init" *> skip_white *>
            (P.chars_if (fun _ -> true) >>= fun s ->
             match Sexp_parser.parse_string_str A.State.parse s with
             | Ok st -> P.return (Init st)
             | Error msg -> P.fail msg))
-      <|> (try_ (string "load") *> skip_white *> (parse_filename >|= fun f -> Load f))
-      <|> (try_ (string "pick") *> skip_white *> (U.int >|= fun i -> Pick i))
-      <|> (try_ (string "next") *> (int_or 1 >|= fun i -> Next i))
-      <|> (try_ (string "help") *> skip_white *>
-           ((P.try_ U.word >|= CCOpt.return) <|> return None) >|= fun what ->
+      <|> (string "load" *> skip_white *> (parse_filename >|= fun f -> Load f))
+      <|> (string "pick" *> skip_white *> (U.int >|= fun i -> Pick i))
+      <|> (string "next" *> (int_or 1 >|= fun i -> Next i))
+      <|> (string "help" *> skip_white *>
+           ((U.word >|= Option.return) <|> return None) >|= fun what ->
            Help what)
       <|> P.fail "invalid command"
     ) <* skip_white
@@ -68,7 +68,7 @@ module Make_cmd(A: ATS.S) = struct
     P.fix (fun self ->
       parse1 >>= fun t ->
       skip_white *> (
-        ((try_ (char ';') *> skip_white *> self >|= fun tl -> t :: tl) <|>
+        ((char ';' *> skip_white *> self >|= fun tl -> t :: tl) <|>
          return [t])))
 
   let hints (s:string) : _ option =
@@ -154,7 +154,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       Fmt.printf "@[<v>%a@,@{<Red>error@}: %s@]@." pp_transitions tr.transitions msg;
   in
   let rec loop () =
-    match lnoise_input "> " |> CCOpt.map String.trim with
+    match lnoise_input "> " |> Option.map String.trim with
     | exception Sys.Break -> loop()
     | None -> () (* exit *)
     | Some "" -> loop()
@@ -191,7 +191,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       )
     | Cmd.Show ->
       Fmt.printf "@[<2>state:@ %a@]@." A.State.pp !cur_st_;
-      CCOpt.iter pp_choices !choices_;
+      Option.iter pp_choices !choices_;
     | (Cmd.Next _ | Cmd.Auto _) when !done_ ->
       Fmt.printf "@{<Red>error@}: already in final state@.";
     | Cmd.Auto n ->
@@ -208,7 +208,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
       cur_st_ := trace.R.Trace.final;
       done_ := R.Trace.is_done trace;
       choices_ := choices;
-      CCOpt.iter pp_choices !choices_;
+      Option.iter pp_choices !choices_;
     | Cmd.Init st ->
       done_ := false;
       choices_ := None;
@@ -224,7 +224,7 @@ let repl ?(ats=default_ats) ?(cmds=[]) () =
             filename Sexp_parser.pp_error msg
       end
     | Cmd.Pick i ->
-      begin match !choices_, CCOpt.flat_map (fun l -> List.nth_opt l i) !choices_ with
+      begin match !choices_, Option.flat_map (fun l -> List.nth_opt l i) !choices_ with
         | _, Some (lazy c,expl) ->
           Fmt.printf "@[<2>@{<yellow>picked@} %d: next state by %S@ %a@]@."
             i expl A.State.pp c;

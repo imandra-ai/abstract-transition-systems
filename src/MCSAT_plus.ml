@@ -11,13 +11,13 @@ module SigMap = CCMap.Make(struct
 
 module Op : sig
   type t =
-    | Assign of {t: Term.t; value: Value.t; } 
+    | Assign of {t: Term.t; value: Value.t; }
 
   val lhs : t -> Term.t
   val pp : t Fmt.printer
 end = struct
   type t =
-    | Assign of {t: Term.t; value: Value.t; } 
+    | Assign of {t: Term.t; value: Value.t; }
 
   let[@inline] lhs = function
     | Assign {t;_} -> t
@@ -30,7 +30,7 @@ module Assignment : sig
   type t
 
   type op = Op.t =
-    | Assign of {t: Term.t; value: Value.t; } 
+    | Assign of {t: Term.t; value: Value.t; }
 
   val eval : t -> Term.t -> Value.t option
   val eval_exn : t -> Term.t -> Value.t
@@ -53,7 +53,7 @@ end = struct
   let empty : t = { assign=TM.empty; }
 
   type op = Op.t =
-    | Assign of {t: Term.t; value: Value.t; } 
+    | Assign of {t: Term.t; value: Value.t; }
 
   let to_iter self =
     TM.to_iter self.assign |> Iter.map (fun (t,value) -> Assign {t;value})
@@ -138,7 +138,7 @@ module Clause = struct
         | _ -> None
       end
     | Term.Not u ->
-      CCOpt.map not (eval_lit_semantic ass u)
+      Option.map not (eval_lit_semantic ass u)
     | _ -> None
 
   (* semantic + trail evaluation *)
@@ -352,7 +352,7 @@ module State = struct
     | UFD_forced of Value.t * Term.t
     | UFD_forbid of (Value.t * Term.t) list
     | UFD_conflict_forbid of Value.t * Term.t * Term.t
-    | UFD_conflict_forced2 of Value.t * Term.t  * Value.t * Term.t 
+    | UFD_conflict_forced2 of Value.t * Term.t  * Value.t * Term.t
 
   type t = {
     env: Env.t;
@@ -461,7 +461,7 @@ module State = struct
     make Env.empty Clause.Set.empty (Trail.empty Env.empty) Term.Map.empty Searching
 
   let update ?cs ?env ?trail ?subst ?status (self:t) : t =
-    let get_or x y = CCOpt.get_or ~default:x y in
+    let get_or x y = Option.get_or ~default:x y in
     let cs = get_or self.cs cs in
     let env = get_or self.env env in
     let trail = get_or self.trail trail in
@@ -534,7 +534,7 @@ module State = struct
       match Term.view t with
       | _ when Term.equal t l -> Some r
       | Term.Bool _ -> None
-      | Term.Not u -> CCOpt.map Term.not_ (rw_rec u)
+      | Term.Not u -> Option.map Term.not_ (rw_rec u)
       | Term.If _ -> None (* TODO: should have been eliminated *)
       | Term.Eq (a, b) ->
         begin match Term.equal a l, Term.equal b l with
@@ -851,7 +851,7 @@ module State = struct
                        let value = Value.unin (Term.ty x) i in
                        if List.for_all (fun (v',_) -> not (Value.equal value v')) l
                        then Some value else None)
-                   |> CCOpt.get_exn
+                   |> Option.get_exn_or "forbid: no value"
                  in
                  [mk_ x value]
 

@@ -11,10 +11,12 @@ build: [
   ["dune" "runtest" "-p" name] {with-test}
 ]
 depends: [
-  "containers"
+  "ocaml" { >= "4.08" }
+  "containers" { >= "3.0" }
   "iter"
   "ats"
-  "vdom"
+  "lwd" { = "0.2" }
+  "brr-lwd" { = "0.2" }
 ]
 pin-depends: [
   ["vdom.dev" "git+https://github.com/LexiFi/ocaml-vdom.git#e847d8cf12951f9db6ead5edafac88ff220e6cff"]
