@@ -260,18 +260,21 @@ module Make_calculus(C : CALCULUS)
         | Ats.ATS.One (_,_,expl) ->
           [b_step; b_next expl; b_multinext]
 
-      | Ats.ATS.Choice l ->
-        let choices =
-          List.mapi
-            (fun i (lazy st,_,expl) ->
-               div_class "ats-choice"
-                 [C.view st;
-                  button ~cls:"ats-button" "pick" (M_pick i);
-                  pre_f "(%s)" expl; ])
-            l
-        in
-        [button ~cls:"ats-button" ~a:[title help_step] "step" M_step],
-        [h2 "choices:"; div_class "ats-choices" choices]
+        | Ats.ATS.Choice l ->
+          let choices =
+            List.mapi
+              (fun i (lazy st,_,expl) ->
+                 div_class "ats-choice"
+                   [C.view st;
+                    button ~cls:"ats-button" "pick" (M_pick i);
+                    pre_f "(%s)" expl; ])
+              l
+          in
+          [b_step :: 
+          [button ~cls:"ats-button" ~a:[title help_step] "step" M_step],
+          [h2 "choices:"; div_class "ats-choices" choices]
+
+      end
     and v_parents =
       let n = List.length m.parents in
       let view_parent i (st,_is_dec,k,expl) = [
